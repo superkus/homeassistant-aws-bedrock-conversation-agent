@@ -17,7 +17,7 @@
       "invalid_credentials": "Invalid AWS credentials. Please check your access key and secret key.",
       "access_denied": "Access denied. Please ensure your IAM user has bedrock:InvokeModel permissions.",
       "cannot_connect": "Cannot connect to AWS Bedrock. Check your region and credentials.",
-      "unknown": "Unknown error occurred"
+      "unknown_error": "Unknown error occurred"
     }
   },
   "options": {

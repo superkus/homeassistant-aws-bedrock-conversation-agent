@@ -1,9 +1,9 @@
 {
   "domain": "bedrock_conversation",
   "name": "AWS Bedrock Conversation",
-  "version": "1.0.36",
+  "version": "1.0.37",
   "codeowners": [
-    "cronus@stolenshoe.com"
+    "@superkus"
   ],
   "config_flow": true,
   "dependencies": [
@@ -14,7 +14,7 @@
     "assist_pipeline",
     "intent"
   ],
-  "documentation": "https://github.com/cronus42/homeassistant-aws-bedrock-conversation-agent",
+  "documentation": "https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "requirements": [

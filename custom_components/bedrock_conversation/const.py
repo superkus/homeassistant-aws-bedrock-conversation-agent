@@ -26,7 +26,6 @@ CONF_EXTRA_ATTRIBUTES_TO_EXPOSE: Final = "extra_attributes_to_expose"
 CONF_LLM_HASS_API: Final = "llm_hass_api"
 CONF_SELECTED_LANGUAGE: Final = "selected_language"
 
-DEFAULT_MODEL: Final = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_MODEL_ID: Final = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_PROMPT: Final = """<persona>
 
@@ -132,6 +131,7 @@ SERVICE_TOOL_ALLOWED_SERVICES: Final = [
 
 ALLOWED_SERVICE_CALL_ARGUMENTS: Final = [
     "brightness",
+    "brightness_pct",
     "rgb_color",
     "temperature",
     "humidity",
@@ -146,6 +146,7 @@ ALLOWED_SERVICE_CALL_ARGUMENTS: Final = [
     "target_temp_high",
     "target_temp_low",
     "position",
+    "tilt_position",
     "volume_level",
     "is_volume_muted",
     "media_content_id",
@@ -156,11 +157,55 @@ ALLOWED_SERVICE_CALL_ARGUMENTS: Final = [
 ]
 
 AVAILABLE_MODELS: Final = [
+    # Claude 4.x family (latest)
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-opus-4-6-v1",
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-opus-4-5-20251101-v1:0",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-opus-4-1-20250805-v1:0",
+    "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "us.anthropic.claude-opus-4-20250514-v1:0",
+    # Claude 3.x family
+    "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "us.anthropic.claude-3-opus-20240229-v1:0",
+    "us.anthropic.claude-3-sonnet-20240229-v1:0",
+    "us.anthropic.claude-3-haiku-20240307-v1:0",
+    # Amazon Nova family
+    "us.amazon.nova-pro-v1:0",
+    "us.amazon.nova-lite-v1:0",
+    "us.amazon.nova-micro-v1:0",
+    "us.amazon.nova-premier-v1:0",
+    # Meta Llama family
+    "us.meta.llama4-maverick-17b-instruct-v1:0",
+    "us.meta.llama4-scout-17b-instruct-v1:0",
+    "us.meta.llama3-3-70b-instruct-v1:0",
+    "us.meta.llama3-2-90b-instruct-v1:0",
+    "us.meta.llama3-2-11b-instruct-v1:0",
+    "us.meta.llama3-2-3b-instruct-v1:0",
+    "us.meta.llama3-2-1b-instruct-v1:0",
+    "us.meta.llama3-1-405b-instruct-v1:0",
+    "us.meta.llama3-1-70b-instruct-v1:0",
+    "us.meta.llama3-1-8b-instruct-v1:0",
+    # Mistral family
+    "us.mistral.pixtral-large-2502-v1:0",
+    # DeepSeek
+    "us.deepseek.r1-v1:0",
 ]
 
-RECOMMENDED_MODELS: Final = AVAILABLE_MODELS
+# Models that support the Anthropic Messages API format (used by invoke_model)
+ANTHROPIC_MODELS_PREFIX: Final = "anthropic.claude"
+
+RECOMMENDED_MODELS: Final = [
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.amazon.nova-pro-v1:0",
+    "us.amazon.nova-lite-v1:0",
+]
 
 # Default prompts
 PERSONA_PROMPTS = {
@@ -192,6 +237,3 @@ CURRENT_DATE_PROMPT = {
 DEVICES_PROMPT = {
     "en": """{% if devices %}The user has the following devices:\n\n{% for device in devices %}{% if device.area_name %}[{{ device.area_name }}] {% endif %}{{ device.name }} ({{ device.entity_id }}): {{ device.state }}{% if device.attributes %} ({% for attr in device.attributes %}{{ attr }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}\n{% endfor %}{% else %}The user has no exposed devices.{% endif %}""",
 }
-
-# Attribute constants
-ATTR_ENTITY_ID: Final = "entity_id"

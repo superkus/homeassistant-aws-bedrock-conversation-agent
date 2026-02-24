@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     HomeAssistantError,
@@ -52,8 +52,7 @@ class BedrockConversationEntity(
         """Initialize the agent."""
         self.hass = hass
         self.entry = entry
-        self.history = {}
-        self.client: BedrockClient = entry.runtime_data["client"]
+        self.client: BedrockClient = entry.runtime_data.client
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = None
         

@@ -1,7 +1,6 @@
 """Config flow for AWS Bedrock Conversation integration."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,17 +15,10 @@ from botocore.exceptions import (
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import llm, selector
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.selector import (
-    NumberSelector,
-    NumberSelectorConfig,
-    NumberSelectorMode,
-)
 
 from .const import (
     AVAILABLE_MODELS,
     CONF_AWS_ACCESS_KEY_ID,
-    CONF_AWS_DEFAULT_REGION,
     CONF_AWS_REGION,
     CONF_AWS_SECRET_ACCESS_KEY,
     CONF_AWS_SESSION_TOKEN,
@@ -72,15 +64,18 @@ async def validate_aws_credentials(hass: HomeAssistant, aws_access_key_id: str, 
             session = boto3.Session(
                 aws_access_key_id=aws_access_key_id,
                 aws_secret_access_key=aws_secret_access_key,
-                aws_session_token=aws_session_token,
+                aws_session_token=aws_session_token or None,
                 region_name=aws_region,
             )
             return session.client("bedrock")
 
         bedrock_client = await hass.async_add_executor_job(_create_client)
         
-        # Try to list foundation models to verify credentials work
-        await hass.async_add_executor_job(bedrock_client.list_foundation_models)
+        # Try to list foundation models to verify credentials work.
+        # Use a lambda so the bound method is called correctly in the executor.
+        await hass.async_add_executor_job(
+            lambda: bedrock_client.list_foundation_models()
+        )
         return None
         
     except NoCredentialsError as e:
@@ -175,15 +170,11 @@ class BedrockConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Get the options flow for this handler."""
-        return BedrockConversationOptionsFlow(config_entry)
+        return BedrockConversationOptionsFlow()
 
 
-class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
+class BedrockConversationOptionsFlow(config_entries.OptionsFlowWithReload):
     """Handle options flow for AWS Bedrock Conversation."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

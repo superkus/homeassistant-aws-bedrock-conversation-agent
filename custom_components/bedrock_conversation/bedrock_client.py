@@ -8,7 +8,7 @@ from typing import Any
 from dataclasses import dataclass
 
 import boto3
-from botocore.exceptions import ClientError, BotoCoreError
+from botocore.exceptions import ClientError
 
 from homeassistant.core import HomeAssistant
 from homeassistant.components import conversation
@@ -27,6 +27,7 @@ from homeassistant.helpers import (
 
 from .utils import closest_color
 from .const import (
+    ANTHROPIC_MODELS_PREFIX,
     CONF_AWS_ACCESS_KEY_ID,
     CONF_AWS_REGION,
     CONF_AWS_SECRET_ACCESS_KEY,
@@ -86,7 +87,9 @@ class BedrockClient:
         # Get AWS credentials from config entry
         aws_access_key_id = self.entry.data.get(CONF_AWS_ACCESS_KEY_ID)
         aws_secret_access_key = self.entry.data.get(CONF_AWS_SECRET_ACCESS_KEY)
-        aws_session_token = self.entry.data.get(CONF_AWS_SESSION_TOKEN)
+        # Empty string session token must be treated as None to avoid
+        # boto3 signature errors when no temporary credentials are used.
+        aws_session_token = self.entry.data.get(CONF_AWS_SESSION_TOKEN) or None
         
         # Get region - try entry.options first, then entry.data, then default
         aws_region = options.get(
@@ -109,7 +112,6 @@ class BedrockClient:
         """Ensure the Bedrock client is initialized (lazy initialization)."""
         if self._bedrock_runtime is None:
             if self._client_lock is None:
-                import asyncio
                 self._client_lock = asyncio.Lock()
             
             async with self._client_lock:
@@ -484,96 +486,202 @@ class BedrockClient:
         messages = self._build_bedrock_messages(conversation_content)
         _LOGGER.info("💬 Built %d message(s) for Bedrock", len(messages))
         
-        # Build request using Anthropic Messages API format (snake_case)
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": messages
-        }
-        
-        # System prompt should be a string, not a list
-        if system_prompt:
-            request_body["system"] = system_prompt
-        
-        # Add tools if available
-        tools = self._format_tools_for_bedrock(llm_api)
-        if tools:
-            request_body["tools"] = tools
-            _LOGGER.info("🔧 Added %d tool(s) to request", len(tools))
-        
-        # Note: For Claude models, temperature and top_p are mutually exclusive.
-        # We use temperature by default and do not include top_p in the request.
-        if not "anthropic.claude" in model_id:
-            request_body["top_p"] = top_p
+        # Build request body based on model type
+        # Anthropic models use the Messages API format with invoke_model
+        # Non-Anthropic models (Nova, Llama, Mistral, DeepSeek) use the
+        # Converse API which provides a unified interface across providers
+        is_anthropic = ANTHROPIC_MODELS_PREFIX in model_id
+
+        if is_anthropic:
+            # Anthropic Messages API format (snake_case)
+            request_body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": messages,
+            }
+
+            if system_prompt:
+                request_body["system"] = system_prompt
+
+            # Add tools if available
+            tools = self._format_tools_for_bedrock(llm_api)
+            if tools:
+                request_body["tools"] = tools
+                _LOGGER.info("Added %d tool(s) to request", len(tools))
+
+            # For Claude Sonnet 4.5+ and Haiku 4.5, temperature and top_p are
+            # mutually exclusive. We use temperature by default and omit top_p.
+        else:
+            # For non-Anthropic models, we use the Converse API which provides
+            # a unified interface. Build the request accordingly.
+            request_body = None  # Signal to use converse API
         
         try:
-            _LOGGER.info("📤 Calling Bedrock model: %s", model_id)
-            
-            # Define a function that does both the invoke AND the read in the executor
-            def invoke_and_read():
-                response = self._bedrock_runtime.invoke_model(
-                    modelId=model_id,
-                    body=json.dumps(request_body)
-                )
-                # Read the response body in the executor thread to avoid blocking
-                # The StreamingBody must be fully consumed in one go to avoid corruption
-                body_stream = response['body']
-                
-                # Read all chunks to ensure we get the complete response
-                chunks = []
-                while True:
-                    chunk = body_stream.read(8192)  # Read in 8KB chunks
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                
-                response_bytes = b''.join(chunks)
-                _LOGGER.debug("📦 Response bytes length: %d", len(response_bytes))
-                
-                # Decode to UTF-8 string
-                response_text = response_bytes.decode('utf-8')
-                _LOGGER.debug("📝 Response text length: %d", len(response_text))
-                
-                # Parse JSON
-                parsed_response = json.loads(response_text)
-                
-                # Log first content block if available for debugging
-                if 'content' in parsed_response and len(parsed_response['content']) > 0:
-                    first_block = parsed_response['content'][0]
-                    if first_block.get('type') == 'text':
-                        text_preview = first_block.get('text', '')[:200]
-                        _LOGGER.info("📄 RAW BEDROCK TEXT PREVIEW: %r", text_preview)
-                        # Also log the character codes to check for corruption
-                        char_codes = [ord(c) for c in text_preview[:50]]
-                        _LOGGER.debug("Character codes: %s", char_codes)
-                
-                return parsed_response
-            
-            # Add timeout protection for Bedrock API calls
-            try:
-                async with asyncio.timeout(30.0):
-                    response_body = await self.hass.async_add_executor_job(invoke_and_read)
-            except asyncio.TimeoutError:
-                error_msg = "Bedrock API call timed out after 30 seconds"
-                _LOGGER.error("⏱️ %s", error_msg)
-                raise HomeAssistantError(error_msg)
-            
-            # Log the full response for debugging
-            # Note: Bedrock uses snake_case (stop_reason), not camelCase (stopReason)
-            stop_reason = response_body.get('stop_reason')
-            _LOGGER.info("📥 Received response from Bedrock (stop_reason: %s)", stop_reason)
-            
-            # Log warning if stop_reason is missing
+            _LOGGER.info("Calling Bedrock model: %s", model_id)
+
+            if is_anthropic and request_body is not None:
+                # Use invoke_model with Anthropic Messages API
+                def invoke_and_read():
+                    response = self._bedrock_runtime.invoke_model(
+                        modelId=model_id,
+                        contentType="application/json",
+                        accept="application/json",
+                        body=json.dumps(request_body).encode("utf-8"),
+                    )
+                    body_stream = response["body"]
+                    chunks = []
+                    while True:
+                        chunk = body_stream.read(8192)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+
+                    response_bytes = b"".join(chunks)
+                    response_text = response_bytes.decode("utf-8")
+                    parsed_response = json.loads(response_text)
+
+                    if "content" in parsed_response and parsed_response["content"]:
+                        first_block = parsed_response["content"][0]
+                        if first_block.get("type") == "text":
+                            _LOGGER.debug(
+                                "Response preview: %s",
+                                first_block.get("text", "")[:200],
+                            )
+
+                    return parsed_response
+
+                try:
+                    async with asyncio.timeout(30.0):
+                        response_body = await self.hass.async_add_executor_job(invoke_and_read)
+                except asyncio.TimeoutError:
+                    raise HomeAssistantError(
+                        "Bedrock API call timed out after 30 seconds"
+                    )
+            else:
+                # Use Converse API for non-Anthropic models (Nova, Llama, Mistral, DeepSeek)
+                def converse_call():
+                    converse_messages = []
+                    for msg in messages:
+                        converse_msg = {"role": msg["role"], "content": []}
+                        for block in msg.get("content", []):
+                            if isinstance(block, dict):
+                                if block.get("type") == "text":
+                                    converse_msg["content"].append({"text": block["text"]})
+                                elif block.get("type") == "tool_use":
+                                    converse_msg["content"].append({
+                                        "toolUse": {
+                                            "toolUseId": block["id"],
+                                            "name": block["name"],
+                                            "input": block.get("input", {}),
+                                        }
+                                    })
+                                elif block.get("type") == "tool_result":
+                                    result_content = block.get("content", [])
+                                    text_parts = []
+                                    for part in result_content:
+                                        if isinstance(part, dict) and "text" in part:
+                                            text_parts.append({"text": part["text"]})
+                                    converse_msg["content"].append({
+                                        "toolResult": {
+                                            "toolUseId": block["tool_use_id"],
+                                            "content": text_parts or [{"text": "OK"}],
+                                        }
+                                    })
+                            else:
+                                converse_msg["content"].append({"text": str(block)})
+                        if converse_msg["content"]:
+                            converse_messages.append(converse_msg)
+
+                    # Note: Converse API inferenceConfig supports maxTokens,
+                    # temperature, topP, and stopSequences only (no topK).
+                    converse_kwargs = {
+                        "modelId": model_id,
+                        "messages": converse_messages,
+                        "inferenceConfig": {
+                            "maxTokens": max_tokens,
+                            "temperature": temperature,
+                            "topP": top_p,
+                        },
+                    }
+                    if system_prompt:
+                        converse_kwargs["system"] = [{"text": system_prompt}]
+
+                    # Add tools if available
+                    tools = self._format_tools_for_bedrock(llm_api)
+                    if tools:
+                        converse_tool_config = {
+                            "tools": [
+                                {
+                                    "toolSpec": {
+                                        "name": t["name"],
+                                        "description": t.get("description", ""),
+                                        "inputSchema": {"json": t.get("input_schema", {})},
+                                    }
+                                }
+                                for t in tools
+                            ]
+                        }
+                        converse_kwargs["toolConfig"] = converse_tool_config
+
+                    response = self._bedrock_runtime.converse(**converse_kwargs)
+
+                    # Convert Converse API response to Anthropic Messages format
+                    # so the rest of the code can handle it uniformly
+                    output = response.get("output", {})
+                    message = output.get("message", {})
+                    content_blocks = []
+                    for block in message.get("content", []):
+                        if "text" in block:
+                            content_blocks.append({"type": "text", "text": block["text"]})
+                        elif "toolUse" in block:
+                            tu = block["toolUse"]
+                            content_blocks.append({
+                                "type": "tool_use",
+                                "id": tu.get("toolUseId", ""),
+                                "name": tu.get("name", ""),
+                                "input": tu.get("input", {}),
+                            })
+
+                    stop_reason_map = {
+                        "end_turn": "end_turn",
+                        "tool_use": "tool_use",
+                        "max_tokens": "max_tokens",
+                        "stop_sequence": "stop_sequence",
+                    }
+                    raw_stop = response.get("stopReason", "end_turn")
+                    mapped_stop = stop_reason_map.get(raw_stop, raw_stop)
+
+                    return {
+                        "stop_reason": mapped_stop,
+                        "content": content_blocks,
+                    }
+
+                try:
+                    async with asyncio.timeout(30.0):
+                        response_body = await self.hass.async_add_executor_job(converse_call)
+                except asyncio.TimeoutError:
+                    raise HomeAssistantError(
+                        "Bedrock Converse API call timed out after 30 seconds"
+                    )
+
+            stop_reason = response_body.get("stop_reason")
+            _LOGGER.info("Received response from Bedrock (stop_reason: %s)", stop_reason)
+
             if stop_reason is None:
-                _LOGGER.warning("⚠️ Bedrock response missing 'stop_reason' field. Full response keys: %s", list(response_body.keys()))
+                _LOGGER.warning(
+                    "Bedrock response missing 'stop_reason'. Response keys: %s",
+                    list(response_body.keys()),
+                )
                 _LOGGER.debug("Full response body: %s", response_body)
-            
+
             return response_body
-            
+
+        except HomeAssistantError:
+            raise
         except ClientError as err:
-            _LOGGER.error("❌ AWS Bedrock error: %s", err, exc_info=True)
+            _LOGGER.error("AWS Bedrock error: %s", err, exc_info=True)
             raise HomeAssistantError(f"Bedrock API error: {err}") from err
         except Exception as err:
-            _LOGGER.exception("❌ Unexpected error calling Bedrock")
+            _LOGGER.exception("Unexpected error calling Bedrock")
             raise HomeAssistantError(f"Unexpected error: {err}") from err

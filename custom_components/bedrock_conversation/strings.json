@@ -17,7 +17,7 @@
       "invalid_credentials": "Invalid AWS credentials",
       "access_denied": "Access denied. Check your IAM permissions",
       "cannot_connect": "Cannot connect to AWS Bedrock",
-      "unknown": "Unknown error occurred"
+      "unknown_error": "Unknown error occurred"
     },
     "abort": {
       "already_configured": "AWS Bedrock is already configured"
