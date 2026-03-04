@@ -323,6 +323,11 @@ class BedrockClient:
                 }
             }
             
+            # Validate tool name length (Bedrock requirement)
+            if len(tool.name) > 64:
+                _LOGGER.warning("⚠️ Tool name '%s' exceeds 64 character limit, truncating", tool.name)
+                tool_def["name"] = tool.name[:64]
+            
             # Convert voluptuous schema to JSON schema
             if hasattr(tool, 'parameters') and tool.parameters:
                 # For HassCallService tool
@@ -377,6 +382,19 @@ class BedrockClient:
                         },
                         "required": ["service", "target_device"]
                     }
+            
+            # Validate schema format for Bedrock compatibility
+            schema = tool_def["input_schema"]
+            if schema.get("type") != "object":
+                _LOGGER.warning("⚠️ Tool schema must have type 'object', found: %s", schema.get("type"))
+                schema["type"] = "object"
+            
+            # Remove unsupported fields that cause validation errors
+            unsupported_fields = ["$schema", "title", "additionalProperties"]
+            for field in unsupported_fields:
+                if field in schema:
+                    _LOGGER.debug("🧹 Removing unsupported schema field: %s", field)
+                    del schema[field]
             
             bedrock_tools.append(tool_def)
         
@@ -694,9 +712,12 @@ class BedrockClient:
                                     for part in result_content:
                                         if isinstance(part, dict) and "text" in part:
                                             text_parts.append({"text": part["text"]})
+                                        else:
+                                            # Handle string content
+                                            text_parts.append({"text": str(part)})
                                     converse_msg["content"].append({
                                         "toolResult": {
-                                            "toolUseId": block["tool_use_id"],
+                                            "toolUseId": block.get("tool_use_id", ""),
                                             "content": text_parts or [{"text": "OK"}],
                                         }
                                     })
@@ -707,12 +728,18 @@ class BedrockClient:
 
                     # Note: Converse API inferenceConfig supports maxTokens,
                     # temperature, topP, and stopSequences only (no topK).
+                    # Nova models work better with temperature=0 for tool calling
+                    inference_temperature = temperature
+                    if tools and "nova" in model_id.lower():
+                        inference_temperature = 0.0
+                        _LOGGER.info("🔧 Using temperature=0 for Nova model tool calling")
+                    
                     converse_kwargs = {
                         "modelId": model_id,
                         "messages": converse_messages,
                         "inferenceConfig": {
                             "maxTokens": max_tokens,
-                            "temperature": temperature,
+                            "temperature": inference_temperature,
                             "topP": top_p,
                         },
                     }
@@ -735,6 +762,10 @@ class BedrockClient:
                             ]
                         }
                         converse_kwargs["toolConfig"] = converse_tool_config
+                        
+                        # Add tool choice for better reliability (Nova models)
+                        if "nova" in model_id.lower():
+                            converse_kwargs["toolConfig"]["toolChoice"] = {"any": {}}
 
                     response = self._bedrock_runtime.converse(**converse_kwargs)
 
@@ -792,8 +823,34 @@ class BedrockClient:
         except HomeAssistantError:
             raise
         except ClientError as err:
-            _LOGGER.error("AWS Bedrock error: %s", err, exc_info=True)
-            raise HomeAssistantError(f"Bedrock API error: {err}") from err
+            error_code = err.response.get('Error', {}).get('Code', '')
+            error_message = err.response.get('Error', {}).get('Message', str(err))
+            
+            if error_code == 'ValidationException':
+                if 'inference profile' in error_message.lower():
+                    _LOGGER.error("❌ Model requires inference profile. Try using: us.%s", model_id)
+                    raise HomeAssistantError(f"Model {model_id} requires inference profile. Try: us.{model_id}")
+                elif 'roles must alternate' in error_message.lower():
+                    _LOGGER.error("❌ Message role alternation error: %s", error_message)
+                    raise HomeAssistantError("Message format error - please restart the conversation")
+                elif 'malformed input request' in error_message.lower():
+                    _LOGGER.error("❌ Request format error: %s", error_message)
+                    raise HomeAssistantError("Request format error - check model configuration")
+                else:
+                    _LOGGER.error("❌ Validation error: %s", error_message)
+                    raise HomeAssistantError(f"Bedrock validation error: {error_message}")
+            elif error_code == 'AccessDeniedException':
+                _LOGGER.error("❌ Access denied: %s", error_message)
+                if 'not authorized' in error_message.lower():
+                    raise HomeAssistantError("AWS account not authorized for Bedrock. Check IAM permissions and model access.")
+                else:
+                    raise HomeAssistantError(f"Access denied: {error_message}")
+            elif error_code == 'ModelErrorException':
+                _LOGGER.error("❌ Model error: %s", error_message)
+                raise HomeAssistantError(f"Model error: {error_message}")
+            else:
+                _LOGGER.error("❌ AWS Bedrock error (%s): %s", error_code, error_message)
+                raise HomeAssistantError(f"Bedrock API error: {err}") from err
         except Exception as err:
             _LOGGER.exception("Unexpected error calling Bedrock")
             raise HomeAssistantError(f"Unexpected error: {err}") from err
