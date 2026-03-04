@@ -448,7 +448,6 @@ class BedrockClient:
             elif isinstance(content, conversation.ToolResultContent):
                 # Tool results go in user messages in Bedrock
                 # Convert tool result to proper content format
-                # If it's a dict/object, send as JSON text; otherwise send as text
                 tool_result_data = content.tool_result
                 if isinstance(tool_result_data, dict):
                     # For dict results, serialize to text to avoid confusion
@@ -465,15 +464,47 @@ class BedrockClient:
                     "content": tool_result_content
                 }
                 
+                # Always append to the last user message or create one if needed
+                # This ensures we don't create consecutive user messages
                 if messages and messages[-1]["role"] == "user":
                     # Append to last user message
                     messages[-1]["content"].append(tool_result_block)
                 else:
-                    # Create new user message
+                    # Create new user message only if the last message was assistant
                     messages.append({
                         "role": "user",
                         "content": [tool_result_block]
                     })
+        
+        # Post-process to ensure proper role alternation
+        # Bedrock requires strict user/assistant alternation
+        processed_messages = []
+        
+        for msg in messages:
+            if not processed_messages:
+                # First message can be any role
+                processed_messages.append(msg)
+            elif processed_messages[-1]["role"] == msg["role"]:
+                # Same role as previous message - merge content
+                if msg["role"] == "user":
+                    # Merge user messages
+                    processed_messages[-1]["content"].extend(msg["content"])
+                elif msg["role"] == "assistant":
+                    # Merge assistant messages
+                    processed_messages[-1]["content"].extend(msg["content"])
+            else:
+                # Different role - add as new message
+                processed_messages.append(msg)
+        
+        # Final validation: ensure we start with user message
+        if processed_messages and processed_messages[0]["role"] != "user":
+            # Insert a dummy user message at the start
+            processed_messages.insert(0, {
+                "role": "user", 
+                "content": [{"type": "text", "text": "Hello"}]
+            })
+        
+        messages = processed_messages
         
         return messages
 
@@ -519,13 +550,17 @@ class BedrockClient:
         messages = self._build_bedrock_messages(conversation_content)
         _LOGGER.info("💬 Built %d message(s) for Bedrock", len(messages))
         
+        # Debug: Log message sequence to identify role alternation issues
+        message_roles = [f"{i}:{msg['role']}" for i, msg in enumerate(messages)]
+        _LOGGER.debug("🔄 Message role sequence: %s", " -> ".join(message_roles))
+        
         # Validate we have messages
         if not messages:
             _LOGGER.error("❌ No messages built from conversation content")
             _LOGGER.error("❌ Conversation content: %s", [type(c).__name__ for c in conversation_content])
             raise HomeAssistantError("No valid messages found in conversation content")
         
-        # Validate message structure
+        # Validate message structure and role alternation
         for i, msg in enumerate(messages):
             if "role" not in msg or "content" not in msg:
                 _LOGGER.error("❌ Invalid message structure at index %d: %s", i, msg)
@@ -533,6 +568,12 @@ class BedrockClient:
             if not msg["content"]:
                 _LOGGER.error("❌ Empty content in message at index %d", i)
                 raise HomeAssistantError(f"Empty content in message at index {i}")
+            
+            # Check role alternation
+            if i > 0 and messages[i-1]["role"] == msg["role"]:
+                _LOGGER.error("❌ Role alternation violation at index %d: %s -> %s", 
+                             i, messages[i-1]["role"], msg["role"])
+                raise HomeAssistantError(f"Invalid role sequence: consecutive {msg['role']} messages")
             
             # Log message structure for debugging
             _LOGGER.debug("📝 Message %d: role=%s, content_blocks=%d", 
