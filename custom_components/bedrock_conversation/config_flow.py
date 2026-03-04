@@ -173,7 +173,7 @@ class BedrockConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return BedrockConversationOptionsFlow()
 
 
-class BedrockConversationOptionsFlow(config_entries.OptionsFlowWithReload):
+class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for AWS Bedrock Conversation."""
 
     async def async_step_init(
@@ -183,11 +183,15 @@ class BedrockConversationOptionsFlow(config_entries.OptionsFlowWithReload):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        # Get available LLM APIs
-        llm_api_ids = [
-            api.id for api in llm.async_get_apis(self.hass) 
-            if api.id != "nlsql"  # Exclude nlsql as it requires special setup
-        ]
+        # Get available LLM APIs with error handling
+        try:
+            llm_api_ids = [
+                api.id for api in llm.async_get_apis(self.hass) 
+                if api.id != "nlsql"  # Exclude nlsql as it requires special setup
+            ]
+        except Exception as e:
+            _LOGGER.warning("Error getting LLM APIs: %s", e)
+            llm_api_ids = []
         
         # Ensure we always have at least the default API in the list
         if HOME_LLM_API_ID not in llm_api_ids:
