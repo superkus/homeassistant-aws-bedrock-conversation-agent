@@ -157,14 +157,14 @@ ALLOWED_SERVICE_CALL_ARGUMENTS: Final = [
 ]
 
 AVAILABLE_MODELS: Final = [
-    # Claude 3.x family (stable and widely available)
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic.claude-3-5-sonnet-20240620-v1:0", 
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic.claude-3-opus-20240229-v1:0",
-    "anthropic.claude-3-sonnet-20240229-v1:0",
-    "anthropic.claude-3-haiku-20240307-v1:0",
-    # Amazon Nova family
+    # Claude 3.x family - using inference profiles for newer models
+    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",  # Inference profile for v2 (requires inference profile)
+    "anthropic.claude-3-5-sonnet-20240620-v1:0",     # Direct model ID (stable)
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0",   # Inference profile for newer haiku
+    "anthropic.claude-3-haiku-20240307-v1:0",        # Direct model ID (stable, recommended)
+    "anthropic.claude-3-opus-20240229-v1:0",         # Direct model ID (stable)
+    "anthropic.claude-3-sonnet-20240229-v1:0",       # Direct model ID (stable)
+    # Amazon Nova family (AWS native models)
     "amazon.nova-pro-v1:0",
     "amazon.nova-lite-v1:0",
     "amazon.nova-micro-v1:0",
@@ -185,10 +185,10 @@ AVAILABLE_MODELS: Final = [
 ANTHROPIC_MODELS_PREFIX: Final = "anthropic.claude"
 
 RECOMMENDED_MODELS: Final = [
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic.claude-3-haiku-20240307-v1:0",
-    "amazon.nova-pro-v1:0",
-    "amazon.nova-lite-v1:0",
+    "anthropic.claude-3-haiku-20240307-v1:0",        # Stable, fast, cost-effective
+    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",  # Latest Sonnet (requires inference profile)
+    "amazon.nova-lite-v1:0",                         # AWS native, reliable
+    "amazon.nova-pro-v1:0",                          # AWS native, more capable
 ]
 
 # Default prompts
