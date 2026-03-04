@@ -489,10 +489,22 @@ class BedrockClient:
         await self._ensure_client()
         
         model_id = options.get(CONF_MODEL_ID, DEFAULT_MODEL_ID)
-        max_tokens = options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-        temperature = options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        top_p = options.get(CONF_TOP_P, DEFAULT_TOP_P)
-        top_k = options.get(CONF_TOP_K, DEFAULT_TOP_K)
+        
+        # Robust type conversion to handle Decimal objects from Home Assistant config
+        try:
+            max_tokens = int(float(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)))
+            temperature = float(options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE))
+            top_p = float(options.get(CONF_TOP_P, DEFAULT_TOP_P))
+            top_k = int(float(options.get(CONF_TOP_K, DEFAULT_TOP_K)))
+        except (ValueError, TypeError) as e:
+            _LOGGER.error("❌ Error converting numeric parameters: %s", e)
+            _LOGGER.error("❌ Raw values: max_tokens=%s, temperature=%s, top_p=%s, top_k=%s",
+                         options.get(CONF_MAX_TOKENS), options.get(CONF_TEMPERATURE),
+                         options.get(CONF_TOP_P), options.get(CONF_TOP_K))
+            raise HomeAssistantError(f"Invalid numeric configuration: {e}")
+        
+        _LOGGER.debug("🔧 Model parameters: max_tokens=%d, temperature=%.2f, top_p=%.3f, top_k=%d",
+                     max_tokens, temperature, top_p, top_k)
         
         # Extract system prompt
         system_prompt = None
@@ -506,6 +518,25 @@ class BedrockClient:
         # Build messages
         messages = self._build_bedrock_messages(conversation_content)
         _LOGGER.info("💬 Built %d message(s) for Bedrock", len(messages))
+        
+        # Validate we have messages
+        if not messages:
+            _LOGGER.error("❌ No messages built from conversation content")
+            _LOGGER.error("❌ Conversation content: %s", [type(c).__name__ for c in conversation_content])
+            raise HomeAssistantError("No valid messages found in conversation content")
+        
+        # Validate message structure
+        for i, msg in enumerate(messages):
+            if "role" not in msg or "content" not in msg:
+                _LOGGER.error("❌ Invalid message structure at index %d: %s", i, msg)
+                raise HomeAssistantError(f"Invalid message structure at index {i}")
+            if not msg["content"]:
+                _LOGGER.error("❌ Empty content in message at index %d", i)
+                raise HomeAssistantError(f"Empty content in message at index {i}")
+            
+            # Log message structure for debugging
+            _LOGGER.debug("📝 Message %d: role=%s, content_blocks=%d", 
+                         i, msg["role"], len(msg["content"]))
         
         # Build request body based on model type
         # Anthropic models use the Messages API format with invoke_model
@@ -531,6 +562,16 @@ class BedrockClient:
                 request_body["tools"] = tools
                 _LOGGER.info("Added %d tool(s) to request", len(tools))
 
+            # Debug: Log request structure (without sensitive data)
+            _LOGGER.debug("🔍 Request body structure: %s", {
+                "anthropic_version": request_body.get("anthropic_version"),
+                "max_tokens": request_body.get("max_tokens"),
+                "temperature": request_body.get("temperature"),
+                "messages_count": len(request_body.get("messages", [])),
+                "system_prompt_length": len(request_body.get("system", "")),
+                "tools_count": len(request_body.get("tools", []))
+            })
+
             # For Claude Sonnet 4.5+ and Haiku 4.5, temperature and top_p are
             # mutually exclusive. We use temperature by default and omit top_p.
         else:
@@ -544,11 +585,20 @@ class BedrockClient:
             if is_anthropic and request_body is not None:
                 # Use invoke_model with Anthropic Messages API
                 def invoke_and_read():
+                    try:
+                        # Ensure proper JSON serialization with type validation
+                        json_body = json.dumps(request_body, ensure_ascii=False, separators=(',', ':'))
+                        _LOGGER.debug("🔍 JSON body length: %d characters", len(json_body))
+                    except (TypeError, ValueError) as e:
+                        _LOGGER.error("❌ JSON serialization error: %s", e)
+                        _LOGGER.error("❌ Request body: %s", request_body)
+                        raise HomeAssistantError(f"Failed to serialize request: {e}")
+                    
                     response = self._bedrock_runtime.invoke_model(
                         modelId=model_id,
                         contentType="application/json",
                         accept="application/json",
-                        body=json.dumps(request_body).encode("utf-8"),
+                        body=json_body.encode("utf-8"),
                     )
                     body_stream = response["body"]
                     chunks = []
