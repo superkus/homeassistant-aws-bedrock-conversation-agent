@@ -260,7 +260,13 @@ class BedrockClient:
         devices_template = DEVICES_PROMPT.get(language, DEVICES_PROMPT["en"])
         
         # Get current date/time and format it with timezone awareness
-        current_datetime = datetime.now(tz=self.hass.config.time_zone).strftime("%A, %B %d, %Y at %I:%M %p")
+        try:
+            from homeassistant.util import dt as dt_util
+            # Use Home Assistant's timezone utilities
+            current_datetime = dt_util.now(self.hass.config.time_zone).strftime("%A, %B %d, %Y at %I:%M %p")
+        except Exception as err:
+            _LOGGER.warning("⚠️ Error with timezone %s, using local time: %s", self.hass.config.time_zone, err)
+            current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
         date_prompt = date_prompt_template.replace("<current_date>", current_datetime)
         
         # Get exposed devices
@@ -276,7 +282,17 @@ class BedrockClient:
             )
         except TemplateError as err:
             _LOGGER.error("❌ Error rendering devices template: %s", err)
-            raise
+            # Fallback to simple device list
+            if not devices:
+                devices_rendered = "The user has no exposed devices."
+            else:
+                device_lines = []
+                for device in devices:
+                    area_prefix = f"[{device.area_name}] " if device.area_name else ""
+                    attrs_str = f" ({', '.join(device.attributes)})" if device.attributes else ""
+                    device_lines.append(f"{area_prefix}{device.name} ({device.entity_id}): {device.state}{attrs_str}")
+                devices_rendered = "The user has the following devices:\n\n" + "\n".join(device_lines)
+            _LOGGER.warning("⚠️ Using fallback device list due to template error")
         
         # Now replace placeholders in the main prompt template
         prompt = prompt_template
