@@ -53,6 +53,71 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+async def get_available_models_for_region(
+    hass: HomeAssistant,
+    aws_access_key_id: str,
+    aws_secret_access_key: str,
+    aws_session_token: str | None,
+    aws_region: str,
+) -> list[str]:
+    """Get available foundation models for the specified region."""
+    try:
+        def _get_models():
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            # Create the boto3 session
+            session = boto3.Session(
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key,
+                aws_session_token=aws_session_token or None,
+                region_name=aws_region,
+            )
+            
+            bedrock_client = session.client('bedrock')
+            
+            try:
+                # List foundation models
+                response = bedrock_client.list_foundation_models()
+                models = []
+                
+                for model in response.get('modelSummaries', []):
+                    model_id = model.get('modelId')
+                    model_name = model.get('modelName', '')
+                    
+                    # Filter for models that support text generation and tool use
+                    input_modalities = model.get('inputModalities', [])
+                    output_modalities = model.get('outputModalities', [])
+                    
+                    if ('TEXT' in input_modalities and 'TEXT' in output_modalities):
+                        models.append(model_id)
+                
+                # Also try to get inference profiles
+                try:
+                    profiles_response = bedrock_client.list_inference_profiles()
+                    for profile in profiles_response.get('inferenceProfileSummaries', []):
+                        profile_id = profile.get('inferenceProfileId')
+                        if profile_id and profile_id not in models:
+                            models.append(profile_id)
+                except ClientError as e:
+                    # Inference profiles might not be available in all regions
+                    _LOGGER.debug("Could not fetch inference profiles: %s", e)
+                
+                return sorted(models)
+                
+            except ClientError as e:
+                _LOGGER.error("Error fetching models from Bedrock: %s", e)
+                return AVAILABLE_MODELS  # Fallback to static list
+        
+        # Run in executor to avoid blocking
+        models = await hass.async_add_executor_job(_get_models)
+        return models if models else AVAILABLE_MODELS
+        
+    except Exception as e:
+        _LOGGER.error("Unexpected error fetching models: %s", e)
+        return AVAILABLE_MODELS  # Fallback to static list
+
+
 async def validate_aws_credentials(hass: HomeAssistant, aws_access_key_id: str, aws_secret_access_key: str, aws_session_token: str | None = None, aws_region: str | None = None) -> dict[str, str] | None:
     """Validate AWS credentials by attempting to list foundation models."""
     if aws_region is None:
@@ -152,7 +217,25 @@ class BedrockConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
         
         data_schema = vol.Schema({
-            vol.Required(CONF_AWS_REGION, default=DEFAULT_AWS_REGION): str,
+            vol.Required(CONF_AWS_REGION, default=DEFAULT_AWS_REGION): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        "us-east-1",      # N. Virginia
+                        "us-west-2",      # Oregon  
+                        "ap-southeast-1", # Singapore
+                        "ap-northeast-1", # Tokyo
+                        "eu-central-1",   # Frankfurt
+                        "eu-west-3",      # Paris
+                        "ca-central-1",   # Canada
+                        "ap-south-1",     # Mumbai
+                        "eu-west-1",      # Ireland
+                        "eu-west-2",      # London
+                        "ap-southeast-2", # Sydney
+                        "sa-east-1",      # São Paulo
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Required(CONF_AWS_ACCESS_KEY_ID): str,
             vol.Required(CONF_AWS_SECRET_ACCESS_KEY): str,
             vol.Optional(CONF_AWS_SESSION_TOKEN): str,
@@ -201,13 +284,41 @@ class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
         if not llm_api_ids:
             llm_api_ids = [HOME_LLM_API_ID]
         
+        # Get available models for the current region
+        available_models = AVAILABLE_MODELS  # Default fallback
+        try:
+            aws_region = self.config_entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
+            aws_access_key_id = self.config_entry.data.get(CONF_AWS_ACCESS_KEY_ID)
+            aws_secret_access_key = self.config_entry.data.get(CONF_AWS_SECRET_ACCESS_KEY)
+            aws_session_token = self.config_entry.data.get(CONF_AWS_SESSION_TOKEN)
+            
+            if aws_access_key_id and aws_secret_access_key:
+                _LOGGER.info("🔍 Fetching available models for region: %s", aws_region)
+                available_models = await get_available_models_for_region(
+                    self.hass,
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_session_token,
+                    aws_region
+                )
+                _LOGGER.info("✅ Found %d models in region %s", len(available_models), aws_region)
+            else:
+                _LOGGER.warning("⚠️ Missing AWS credentials, using static model list")
+        except Exception as e:
+            _LOGGER.error("❌ Error fetching models for region, using static list: %s", e)
+        
+        # Ensure current model is in the list
+        current_model = self.config_entry.options.get(CONF_MODEL_ID, DEFAULT_MODEL_ID)
+        if current_model not in available_models:
+            available_models.insert(0, current_model)
+        
         options_schema = vol.Schema({
             vol.Optional(
                 CONF_MODEL_ID,
-                default=self.config_entry.options.get(CONF_MODEL_ID, DEFAULT_MODEL_ID)
+                default=current_model
             ): selector.SelectSelector(
                 selector.SelectSelectorConfig(
-                    options=AVAILABLE_MODELS,
+                    options=available_models,
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
