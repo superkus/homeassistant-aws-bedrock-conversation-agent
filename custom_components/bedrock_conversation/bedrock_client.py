@@ -783,6 +783,10 @@ class BedrockClient:
 
                     # Note: Converse API inferenceConfig supports maxTokens,
                     # temperature, topP, and stopSequences only (no topK).
+                    
+                    # Get tools first to determine temperature setting
+                    tools = self._format_tools_for_bedrock(llm_api)
+                    
                     # Nova models work better with temperature=0 for tool calling
                     inference_temperature = temperature
                     if tools and "nova" in model_id.lower():
@@ -802,7 +806,6 @@ class BedrockClient:
                         converse_kwargs["system"] = [{"text": system_prompt}]
 
                     # Add tools if available
-                    tools = self._format_tools_for_bedrock(llm_api)
                     if tools:
                         converse_tool_config = {
                             "tools": [
