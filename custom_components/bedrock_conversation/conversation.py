@@ -168,6 +168,17 @@ class BedrockConversationEntity(
                         response=intent_response,
                         conversation_id=user_input.conversation_id
                     )
+                except Exception as err:
+                    _LOGGER.error("❌ Unexpected error generating system prompt: %s", err, exc_info=True)
+                    intent_response = intent.IntentResponse(language=user_input.language)
+                    intent_response.async_set_error(
+                        intent.IntentResponseErrorCode.UNKNOWN,
+                        "Sorry, I had a problem generating the system prompt.",
+                    )
+                    return conversation.ConversationResult(
+                        response=intent_response,
+                        conversation_id=user_input.conversation_id
+                    )
                 
                 if len(message_history) == 0:
                     message_history.append(system_prompt)
@@ -305,6 +316,20 @@ class BedrockConversationEntity(
                     
                     # Execute tool calls
                     _LOGGER.info("⚙️ Executing %d tool call(s)...", len(tool_calls))
+                    
+                    # Check if LLM API is available for tool execution
+                    if llm_api is None:
+                        _LOGGER.error("❌ Cannot execute tools: LLM API not configured")
+                        intent_response = intent.IntentResponse(language=user_input.language)
+                        intent_response.async_set_error(
+                            intent.IntentResponseErrorCode.UNKNOWN,
+                            "Sorry, I cannot execute tools without LLM API configuration.",
+                        )
+                        return conversation.ConversationResult(
+                            response=intent_response,
+                            conversation_id=user_input.conversation_id
+                        )
+                    
                     tool_iteration_results = []
                     
                     for idx, tool_call in enumerate(tool_calls):

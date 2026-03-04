@@ -74,11 +74,11 @@ class BedrockClient:
     """AWS Bedrock client."""
 
     def __init__(self, hass: HomeAssistant, entry: BedrockConfigEntry) -> None:
-        """Initialize the client."""
+        """Initialize the Bedrock client."""
         self.hass = hass
         self.entry = entry
         self._bedrock_runtime = None
-        self._client_lock = None
+        self._client_lock = asyncio.Lock()  # Initialize lock here to prevent race condition
 
     def _create_bedrock_client(self) -> Any:
         """Create the AWS Bedrock client (runs in executor)."""
@@ -111,9 +111,6 @@ class BedrockClient:
     async def _ensure_client(self) -> None:
         """Ensure the Bedrock client is initialized (lazy initialization)."""
         if self._bedrock_runtime is None:
-            if self._client_lock is None:
-                self._client_lock = asyncio.Lock()
-            
             async with self._client_lock:
                 # Double-check after acquiring lock
                 if self._bedrock_runtime is None:
@@ -152,15 +149,22 @@ class BedrockClient:
             # Brightness
             if state.domain == "light" and "brightness" in extra_attributes:
                 brightness = state.attributes.get("brightness")
-                if brightness is not None:
-                    attributes.append(f"{int(brightness * 100 / 255)}%")
+                if brightness is not None and isinstance(brightness, (int, float)) and brightness >= 0:
+                    try:
+                        brightness_pct = int(brightness * 100 / 255)
+                        attributes.append(f"{brightness_pct}%")
+                    except (ValueError, ZeroDivisionError):
+                        _LOGGER.debug("Invalid brightness value for %s: %s", state.entity_id, brightness)
             
             # Color
             if state.domain == "light" and "rgb_color" in extra_attributes:
                 rgb_color = state.attributes.get("rgb_color")
-                if rgb_color:
-                    color_name = closest_color(tuple(rgb_color))
-                    attributes.append(color_name)
+                if rgb_color and isinstance(rgb_color, (list, tuple)) and len(rgb_color) >= 3:
+                    try:
+                        color_name = closest_color(tuple(rgb_color[:3]))  # Take only first 3 values
+                        attributes.append(color_name)
+                    except (ValueError, TypeError) as e:
+                        _LOGGER.debug("Invalid RGB color for %s: %s (%s)", state.entity_id, rgb_color, e)
             
             # Temperature
             if "temperature" in extra_attributes:
@@ -255,8 +259,8 @@ class BedrockClient:
         date_prompt_template = CURRENT_DATE_PROMPT.get(language, CURRENT_DATE_PROMPT["en"])
         devices_template = DEVICES_PROMPT.get(language, DEVICES_PROMPT["en"])
         
-        # Get current date/time and format it
-        current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+        # Get current date/time and format it with timezone awareness
+        current_datetime = datetime.now(tz=self.hass.config.time_zone).strftime("%A, %B %d, %Y at %I:%M %p")
         date_prompt = date_prompt_template.replace("<current_date>", current_datetime)
         
         # Get exposed devices
@@ -409,8 +413,9 @@ class BedrockClient:
                 
                 if content.tool_calls:
                     for tool_call in content.tool_calls:
-                        # Use the actual Bedrock tool_use_id if we found it, otherwise fallback
-                        tool_use_id = tool_call_to_id.get(id(tool_call), f"tool_{id(tool_call)}")
+                        # Use the actual Bedrock tool_use_id if we found it, otherwise generate stable UUID
+                        import uuid
+                        tool_use_id = tool_call_to_id.get(id(tool_call), f"tool_{uuid.uuid4().hex[:8]}")
                         message_content.append({
                             "type": "tool_use",
                             "id": tool_use_id,
