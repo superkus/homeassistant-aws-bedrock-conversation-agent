@@ -409,6 +409,9 @@ class BedrockClient:
         """Convert Home Assistant conversation to Bedrock message format."""
         messages = []
         
+        # Track used tool IDs to ensure uniqueness
+        used_tool_ids = set()
+        
         # First pass: build a mapping of tool_call identity to actual Bedrock tool_use_id
         # by looking at ToolResultContent entries which have the correct IDs
         tool_call_to_id = {}
@@ -423,6 +426,7 @@ class BedrockClient:
                             if future_content.tool_name == tool_call.tool_name:
                                 # Found the corresponding tool result
                                 tool_call_to_id[id(tool_call)] = future_content.tool_call_id
+                                used_tool_ids.add(future_content.tool_call_id)
                                 break
                         # Stop searching if we hit another AssistantContent (new turn)
                         elif isinstance(future_content, conversation.AssistantContent):
@@ -446,10 +450,23 @@ class BedrockClient:
                     message_content.append({"type": "text", "text": content.content})
                 
                 if content.tool_calls:
-                    for tool_call in content.tool_calls:
-                        # Use the actual Bedrock tool_use_id if we found it, otherwise generate stable UUID
-                        import uuid
-                        tool_use_id = tool_call_to_id.get(id(tool_call), f"tool_{uuid.uuid4().hex[:8]}")
+                    for i, tool_call in enumerate(content.tool_calls):
+                        # Use the actual Bedrock tool_use_id if we found it, otherwise generate unique ID
+                        if id(tool_call) in tool_call_to_id:
+                            tool_use_id = tool_call_to_id[id(tool_call)]
+                        else:
+                            # Generate guaranteed unique ID
+                            import uuid
+                            import time
+                            base_id = f"tool_{int(time.time() * 1000000)}_{i}_{uuid.uuid4().hex[:8]}"
+                            # Ensure uniqueness
+                            counter = 0
+                            tool_use_id = base_id
+                            while tool_use_id in used_tool_ids:
+                                counter += 1
+                                tool_use_id = f"{base_id}_{counter}"
+                            used_tool_ids.add(tool_use_id)
+                        
                         message_content.append({
                             "type": "tool_use",
                             "id": tool_use_id,
@@ -494,9 +511,10 @@ class BedrockClient:
                         "content": [tool_result_block]
                     })
         
-        # Post-process to ensure proper role alternation
+        # Post-process to ensure proper role alternation and unique tool IDs
         # Bedrock requires strict user/assistant alternation
         processed_messages = []
+        all_tool_ids = set()
         
         for msg in messages:
             if not processed_messages:
@@ -508,10 +526,37 @@ class BedrockClient:
                     # Merge user messages
                     processed_messages[-1]["content"].extend(msg["content"])
                 elif msg["role"] == "assistant":
-                    # Merge assistant messages
-                    processed_messages[-1]["content"].extend(msg["content"])
+                    # Merge assistant messages - but check for duplicate tool IDs
+                    for content_block in msg["content"]:
+                        if content_block.get("type") == "tool_use":
+                            tool_id = content_block.get("id")
+                            if tool_id in all_tool_ids:
+                                # Generate new unique ID
+                                import uuid
+                                import time
+                                new_id = f"tool_{int(time.time() * 1000000)}_{uuid.uuid4().hex[:8]}"
+                                while new_id in all_tool_ids:
+                                    new_id = f"tool_{int(time.time() * 1000000)}_{uuid.uuid4().hex[:8]}"
+                                content_block["id"] = new_id
+                                _LOGGER.warning("⚠️ Replaced duplicate tool ID %s with %s", tool_id, new_id)
+                            all_tool_ids.add(content_block["id"])
+                        processed_messages[-1]["content"].append(content_block)
             else:
                 # Different role - add as new message
+                # Track tool IDs in this message
+                for content_block in msg.get("content", []):
+                    if content_block.get("type") == "tool_use":
+                        tool_id = content_block.get("id")
+                        if tool_id in all_tool_ids:
+                            # Generate new unique ID
+                            import uuid
+                            import time
+                            new_id = f"tool_{int(time.time() * 1000000)}_{uuid.uuid4().hex[:8]}"
+                            while new_id in all_tool_ids:
+                                new_id = f"tool_{int(time.time() * 1000000)}_{uuid.uuid4().hex[:8]}"
+                            content_block["id"] = new_id
+                            _LOGGER.warning("⚠️ Replaced duplicate tool ID %s with %s", tool_id, new_id)
+                        all_tool_ids.add(content_block["id"])
                 processed_messages.append(msg)
         
         # Final validation: ensure we start with user message
@@ -593,9 +638,19 @@ class BedrockClient:
                              i, messages[i-1]["role"], msg["role"])
                 raise HomeAssistantError(f"Invalid role sequence: consecutive {msg['role']} messages")
             
+            # Validate tool_use IDs are unique within this message and globally
+            tool_ids_in_message = []
+            for content_block in msg["content"]:
+                if isinstance(content_block, dict) and content_block.get("type") == "tool_use":
+                    tool_id = content_block.get("id")
+                    if tool_id in tool_ids_in_message:
+                        _LOGGER.error("❌ Duplicate tool ID within message %d: %s", i, tool_id)
+                        raise HomeAssistantError(f"Duplicate tool ID in message {i}: {tool_id}")
+                    tool_ids_in_message.append(tool_id)
+            
             # Log message structure for debugging
-            _LOGGER.debug("📝 Message %d: role=%s, content_blocks=%d", 
-                         i, msg["role"], len(msg["content"]))
+            _LOGGER.debug("📝 Message %d: role=%s, content_blocks=%d, tool_ids=%s", 
+                         i, msg["role"], len(msg["content"]), tool_ids_in_message)
         
         # Build request body based on model type
         # Anthropic models use the Messages API format with invoke_model
@@ -833,6 +888,9 @@ class BedrockClient:
                 elif 'roles must alternate' in error_message.lower():
                     _LOGGER.error("❌ Message role alternation error: %s", error_message)
                     raise HomeAssistantError("Message format error - please restart the conversation")
+                elif 'tool_use ids must be unique' in error_message.lower():
+                    _LOGGER.error("❌ Duplicate tool IDs detected: %s", error_message)
+                    raise HomeAssistantError("Tool ID conflict - please restart the conversation")
                 elif 'malformed input request' in error_message.lower():
                     _LOGGER.error("❌ Request format error: %s", error_message)
                     raise HomeAssistantError("Request format error - check model configuration")
