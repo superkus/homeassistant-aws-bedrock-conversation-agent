@@ -140,6 +140,54 @@ class BedrockClient:
                         self._create_bedrock_client
                     )
 
+    def _resolve_inference_profile(self, model_id: str, options: dict[str, Any]) -> str:
+        """Resolve model ID to inference profile if needed.
+        
+        Newer Bedrock models require regional inference profiles instead of
+        direct model IDs. This method maps the AWS region to the correct
+        prefix (us, eu, ap) and prepends it if not already present.
+        """
+        # If it already has a regional prefix, leave it alone
+        regional_prefixes = ("us.", "eu.", "ap.", "sa.", "ca.")
+        if any(model_id.startswith(p) for p in regional_prefixes):
+            return model_id
+        
+        # If it looks like an ARN, leave it alone
+        if model_id.startswith("arn:"):
+            return model_id
+        
+        # Map AWS region to inference profile prefix
+        region = options.get(
+            CONF_AWS_REGION,
+            self.entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
+        )
+        
+        region_prefix_map = {
+            "us-east-1": "us",
+            "us-east-2": "us",
+            "us-west-2": "us",
+            "eu-central-1": "eu",
+            "eu-west-1": "eu",
+            "eu-west-2": "eu",
+            "eu-west-3": "eu",
+            "ap-southeast-1": "ap",
+            "ap-northeast-1": "ap",
+            "ap-south-1": "ap",
+            "ap-southeast-2": "ap",
+            "ca-central-1": "ca",
+            "sa-east-1": "sa",
+        }
+        
+        prefix = region_prefix_map.get(region)
+        if prefix:
+            resolved = f"{prefix}.{model_id}"
+            _LOGGER.info("🔄 Resolved model ID: %s -> %s (region: %s)", model_id, resolved, region)
+            return resolved
+        
+        # Unknown region, return as-is
+        _LOGGER.debug("No inference profile prefix for region %s, using model ID as-is: %s", region, model_id)
+        return model_id
+
     def _get_exposed_entities(self) -> list[DeviceInfo]:
         """Get all exposed entities with their information."""
         entity_registry = er.async_get(self.hass)
@@ -605,6 +653,12 @@ class BedrockClient:
         
         model_id = options.get(CONF_MODEL_ID, DEFAULT_MODEL_ID)
         
+        # Resolve inference profile: if the model ID doesn't already have a
+        # regional prefix and the region requires one, add it automatically.
+        # AWS Bedrock requires inference profiles (e.g. us.model-id or eu.model-id)
+        # for newer models when using on-demand throughput.
+        model_id = self._resolve_inference_profile(model_id, options)
+        
         # Robust type conversion to handle Decimal objects from Home Assistant config
         try:
             max_tokens = int(float(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)))
@@ -901,8 +955,8 @@ class BedrockClient:
             
             if error_code == 'ValidationException':
                 if 'inference profile' in error_message.lower():
-                    _LOGGER.error("❌ Model requires inference profile. Try using: us.%s", model_id)
-                    raise HomeAssistantError(f"Model {model_id} requires inference profile. Try: us.{model_id}")
+                    _LOGGER.error("❌ Model requires inference profile but auto-resolution failed: %s", error_message)
+                    raise HomeAssistantError(f"Model {model_id} requires an inference profile. Check that the model is available in your region.")
                 elif 'roles must alternate' in error_message.lower():
                     _LOGGER.error("❌ Message role alternation error: %s", error_message)
                     raise HomeAssistantError("Message format error - please restart the conversation")
