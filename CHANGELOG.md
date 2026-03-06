@@ -43,3 +43,51 @@ All notable changes to this project will be documented in this file.
 - Conversation memory with configurable history length
 - AWS credential management with session token support
 - HACS-compatible installation
+
+### History
+
+#### 2026-03-04 — Stability and compatibility fixes
+- Fix config flow 500 error for HACS installation (remove `ai_task` dependency, use `OptionsFlow`)
+- Fix invalid Bedrock model identifiers (remove incorrect `us.` prefix, use stable Claude 3.x IDs)
+- Fix critical bugs: race condition in client init, unstable `id()` for tool tracking, null LLM API check
+- Fix timezone handling in system prompt generation
+- Fix BigDecimal type error for numeric parameters
+- Fix message role alternation (merge consecutive same-role messages)
+- Fix duplicate `tool_use_id` for multi-device actions
+- Comprehensive Bedrock API compatibility fixes (tool schema, Nova optimizations, error handling)
+- Add dynamic model selection based on AWS region
+
+#### 2026-02-24 — Refactor and Converse API support
+- Fix `invoke_model`: add explicit `contentType`/`accept`, encode body as bytes
+- Fix empty session token causing `SignatureDoesNotMatch`
+- Add Converse API path for non-Anthropic models (Nova, Llama, Mistral)
+- Fix `OptionsFlow`: remove deprecated `__init__(config_entry)` pattern
+- Type `runtime_data` with `BedrockRuntimeData` dataclass
+- Fix `strings.json`/translations error key mismatch
+- Optimize `utils.py`: pre-compute CSS3 color RGB mapping at module load
+
+#### 2025-12-22 — Early development iteration
+- Fix async/await bug in client setup
+- Fix tool-ID tracking and result parsing
+- Move response body read to executor thread to prevent event loop blocking
+- Add timeouts and error returns
+- Fix `StopReason` parsing and tool call parsing
+- Fix `top_p` issue with Claude
+- Improve system prompts and add context bits
+- Fix config flow and model selection
+- Update test dependencies and test environment
+
+#### 2025-12-21 — Core implementation
+- Complete conversation agent and Bedrock client implementation
+- Add tool calling loop with error handling
+- Add conversation memory and history management
+- Fix `async_get_api` params and LLM context
+- Fix tests and formatting
+- Fix interface and broken dependencies
+- Fix action runner test environment
+
+#### 2025-12-20 — Initial release
+- Remove add-on implementation, ship as custom component
+- Add `invoke_model` support with model-specific data shapes
+- Add memory and format handling
+- Bump to v1.0.0
