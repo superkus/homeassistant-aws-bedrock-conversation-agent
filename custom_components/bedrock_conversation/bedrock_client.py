@@ -1,4 +1,17 @@
-"""AWS Bedrock client for conversation agents."""
+"""AWS Bedrock client for conversation agents.
+
+Manages the boto3 Bedrock Runtime client lifecycle, builds API requests in both
+the Anthropic Messages API format (for Claude models) and the Converse API format
+(for Nova, Llama, Mistral), handles tool calling, and generates system prompts
+with exposed device information.
+
+Key responsibilities:
+- Lazy client initialization with region change detection
+- Automatic inference profile resolution (us./eu./ap. prefixes)
+- Message role alternation enforcement and tool ID uniqueness
+- System prompt generation with Jinja2 device templates
+- Robust error handling with specific messages for common Bedrock issues
+"""
 from __future__ import annotations
 
 import asyncio

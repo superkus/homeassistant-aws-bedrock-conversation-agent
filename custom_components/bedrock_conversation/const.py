@@ -1,4 +1,8 @@
-"Constants for the AWS Bedrock Conversation integration."
+"""Constants for the AWS Bedrock Conversation integration.
+
+Defines configuration keys, default values, allowed services/domains,
+available model IDs, and system prompt templates.
+"""
 from typing import Final
 
 DOMAIN: Final = "bedrock_conversation"

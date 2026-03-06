@@ -1,4 +1,8 @@
-"Utility functions for the Bedrock Conversation integration."
+"""Utility functions for the Bedrock Conversation integration.
+
+Provides color matching utilities for converting RGB tuples to CSS3 color names,
+used when reporting light color attributes in the system prompt.
+"""
 import webcolors
 
 # Pre-compute CSS3 color name to RGB mapping once at module load

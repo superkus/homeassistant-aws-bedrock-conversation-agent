@@ -1,164 +1,73 @@
 # Development Guide
 
-## Quick Start
-
-```bash
-# Show all available commands
-make help
-
-# Install dependencies
-make deps
-
-# Run tests
-make test
-
-# Format code
-make format
-
-# Check code quality
-make lint
-make typecheck
-
-# Clean build artifacts
-make clean
-```
-
-## Makefile Targets
-
-### `make help`
-Show all available targets with descriptions
-
-### `make deps`
-Install all development and test dependencies in a virtual environment
-
-### `make test`
-Run the full test suite with coverage reporting
-- Creates coverage report in `htmlcov/index.html`
-- Shows coverage percentage in terminal
-
-### `make lint`
-Run code linters (ruff and flake8)
-
-### `make format`
-Auto-format code with black and isort
-
-### `make typecheck`
-Run mypy type checking
-
-### `make clean`
-Remove all build artifacts, cache files, and virtual environment
-
-### `make release`
-**Create a new release:**
-1. Runs full test suite
-2. Checks git working tree is clean
-3. Extracts version from `manifest.json`
-4. Creates and pushes git tag
-5. Prints next steps for GitHub release
-
-### `make version`
-Show current version from manifest.json
-
-## Development Workflow
-
-### Setting Up
-```bash
-# Clone the repository
-git clone <repo-url>
-cd homeassistant-aws-bedrock-conversation-agent
-
-# Install dependencies
-make deps
-
-# Activate virtual environment
-source .venv/bin/activate
-```
-
-### Making Changes
-```bash
-# Make your changes
-vim custom_components/bedrock_conversation/some_file.py
-
-# Format code
-make format
-
-# Run tests
-make test
-
-# Check code quality
-make lint
-make typecheck
-```
-
-### Testing Locally
-```bash
-# Copy to Home Assistant
-cp -r custom_components/bedrock_conversation ~/.homeassistant/custom_components/
-
-# Restart Home Assistant
-# Test your changes
-```
-
-### Releasing
-```bash
-# Update version in manifest.json
-vim custom_components/bedrock_conversation/manifest.json
-
-# Commit changes
-git add .
-git commit -m "Release v1.0.1"
-
-# Create release (runs tests, creates tag, pushes)
-make release
-
-# Create GitHub release with release notes
-# Submit to HACS
-```
-
 ## Project Structure
 
 ```
 .
-├── Makefile                 # Build automation
-├── custom_components/       # The actual integration
+├── custom_components/
 │   └── bedrock_conversation/
-├── tests/                   # Unit tests
-├── requirements-test.txt    # Test dependencies
-├── requirements-dev.txt     # Dev tools
-└── pytest.ini              # Test configuration
+│       ├── __init__.py          # Integration setup, HassServiceTool, BedrockServicesAPI
+│       ├── bedrock_client.py    # Bedrock API client, message building, tool formatting
+│       ├── config_flow.py       # Config and options flows, credential validation
+│       ├── const.py             # Constants, model lists, default prompts
+│       ├── conversation.py      # ConversationEntity, message processing loop
+│       ├── manifest.json        # Integration metadata and dependencies
+│       ├── strings.json         # UI strings
+│       ├── translations/en.json # English translations
+│       └── utils.py             # Color matching utilities
+├── tests/                       # Unit tests
+├── Makefile                     # Build automation
+├── requirements-dev.txt         # Dev tools (black, ruff, mypy)
+├── requirements-test.txt        # Test dependencies (pytest, pytest-asyncio)
+└── pytest.ini                   # Test configuration
 ```
 
-## Code Style
+## Key Components
 
-- **Formatter**: black (line length 88)
-- **Import sorting**: isort
-- **Linter**: ruff + flake8
-- **Type checking**: mypy
-- Follow Home Assistant coding standards
+### `__init__.py`
+- Registers the `BedrockServicesAPI` LLM API with Home Assistant
+- Defines `HassServiceTool` — the tool the model calls to control devices
+- Validates service calls against allowed domains and services from `const.py`
 
-## Testing
+### `bedrock_client.py`
+- `BedrockClient` — manages the boto3 client lifecycle with lazy initialization and region change detection
+- `_resolve_inference_profile()` — maps AWS regions to inference profile prefixes (`us.`, `eu.`, `ap.`, etc.)
+- `_build_bedrock_messages()` — converts Home Assistant conversation content to Bedrock message format with role alternation enforcement and unique tool ID generation
+- `_format_tools_for_bedrock()` — converts Home Assistant tool definitions to Bedrock's tool schema format
+- `_generate_system_prompt()` — renders the system prompt with persona, date/time, and exposed device list
+- `async_generate()` — routes to either the Anthropic Messages API (`invoke_model`) or the Converse API based on model type
 
-### Test Organization
-- `tests/conftest.py` - Shared fixtures
-- `tests/test_*.py` - Test files matching module names
-- Mock AWS calls - never make real API requests
+### `config_flow.py`
+- Initial setup flow: region selection, credential validation
+- Two-step options flow: region selection → dynamic model list + parameters
+- `get_available_models_for_region()` — fetches foundation models and inference profiles from Bedrock
 
-### Writing Tests
-```python
-import pytest
-from unittest.mock import patch
+### `conversation.py`
+- `BedrockConversationEntity` — the conversation agent entity
+- `async_process()` — main message processing loop with tool calling iteration
 
-@pytest.mark.asyncio
-async def test_my_feature(hass, mock_config_entry):
-    """Test description."""
-    # Your test code
-    assert result is True
-```
+### `const.py`
+- All configuration keys, defaults, allowed services, and model lists
+- System prompt templates (persona, date, devices) with multi-language support
 
-### Running Specific Tests
+## Quick Start
+
 ```bash
+make deps      # Install dependencies
+make test      # Run tests with coverage
+make lint      # Run ruff and flake8
+make format    # Auto-format with black and isort
+make typecheck # Run mypy
+```
+
+## Running Tests
+
+```bash
+# Full suite
+make test
+
 # Single file
-pytest tests/test_utils.py
+pytest tests/test_bedrock_client.py -v
 
 # Single test
 pytest tests/test_utils.py::test_closest_color -v
@@ -167,10 +76,22 @@ pytest tests/test_utils.py::test_closest_color -v
 pytest tests/ -v -s
 ```
 
-## Debugging
+Tests mock all AWS calls — no real API requests are made.
+
+## Local Testing with Home Assistant
+
+```bash
+# Copy to your HA config directory
+cp -r custom_components/bedrock_conversation /path/to/ha/config/custom_components/
+
+# Restart Home Assistant
+# Test your changes
+```
 
 ### Enable Debug Logging
-Add to Home Assistant `configuration.yaml`:
+
+Add to `configuration.yaml`:
+
 ```yaml
 logger:
   default: info
@@ -178,83 +99,56 @@ logger:
     custom_components.bedrock_conversation: debug
 ```
 
-### VS Code
-Add to `.vscode/launch.json`:
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Python: Current File",
-      "type": "python",
-      "request": "launch",
-      "program": "${file}",
-      "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}"
-      }
-    }
-  ]
-}
+This enables detailed logging including message role sequences, tool IDs, request structure, and API responses.
+
+## Code Style
+
+- **Formatter**: black (line length 88)
+- **Import sorting**: isort
+- **Linter**: ruff + flake8
+- **Type checking**: mypy
+- Follow Home Assistant coding conventions
+
+## API Routing
+
+The integration uses two different Bedrock APIs depending on the model:
+
+| Model Family | API | Why |
+|-------------|-----|-----|
+| Anthropic Claude | `invoke_model` (Messages API) | Native format, supports all Claude features |
+| Amazon Nova, Meta Llama, Mistral | `converse` (Converse API) | Unified interface for non-Anthropic models |
+
+The routing is determined by checking if the model ID contains `anthropic.claude`.
+
+## Inference Profile Resolution
+
+Newer Bedrock models require regional inference profiles instead of direct model IDs. The `_resolve_inference_profile()` method handles this transparently:
+
+```
+Region eu-west-3 + model amazon.nova-lite-v1:0
+  → resolved to eu.amazon.nova-lite-v1:0
 ```
 
-## Version Management
+The mapping:
+- `us-east-1`, `us-east-2`, `us-west-2` → `us.`
+- `eu-central-1`, `eu-west-1`, `eu-west-2`, `eu-west-3` → `eu.`
+- `ap-southeast-1`, `ap-northeast-1`, `ap-south-1`, `ap-southeast-2` → `ap.`
+- `ca-central-1` → `ca.`
+- `sa-east-1` → `sa.`
 
-Version is stored in `custom_components/bedrock_conversation/manifest.json`:
-```json
-{
-  "version": "1.0.0"
-}
-```
+Models that already have a prefix or are ARNs are left unchanged.
 
-The Makefile automatically extracts this version for releases.
+## Releasing
 
-## Release Checklist
-
-- [ ] Update version in `manifest.json`
-- [ ] Update `CHANGELOG.md`
-- [ ] Run `make test` - all tests pass
-- [ ] Run `make lint` - no issues
-- [ ] Commit all changes
-- [ ] Run `make release`
-- [ ] Create GitHub release with notes
-- [ ] Test installation from HACS
-- [ ] Announce on Home Assistant Community
-
-## Troubleshooting
-
-### Tests Fail
 ```bash
-# Reinstall dependencies
-make clean
-make deps
-make test
+# 1. Update version in manifest.json
+# 2. Update CHANGELOG.md
+# 3. Commit
+git add .
+git commit -m "Release v1.0.38"
+
+# 4. Create release
+make release
 ```
 
-### Import Errors
-```bash
-# Activate virtual environment
-source .venv/bin/activate
-```
-
-### Release Fails
-```bash
-# Check working tree is clean
-git status
-
-# Check version extraction
-make version
-
-# Check no tag exists
-git tag | grep v1.0.0
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests and linters
-5. Submit a pull request
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+The Makefile extracts the version from `manifest.json`, creates a git tag, and pushes it.
