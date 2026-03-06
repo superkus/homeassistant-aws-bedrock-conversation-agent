@@ -82,6 +82,8 @@ class BedrockClient:
 
     def _create_bedrock_client(self) -> Any:
         """Create the AWS Bedrock client (runs in executor)."""
+        from botocore.config import Config
+        
         options = self.entry.options
         
         # Get AWS credentials from config entry
@@ -96,6 +98,13 @@ class BedrockClient:
             CONF_AWS_REGION, 
             self.entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION))
         
+        # Configure boto3 with explicit timeouts to prevent hanging
+        boto_config = Config(
+            connect_timeout=10,    # 10s to establish connection
+            read_timeout=120,      # 120s to read response (LLM can be slow)
+            retries={"max_attempts": 2, "mode": "adaptive"},
+        )
+        
         # Create the boto3 session
         session = boto3.Session(
             aws_access_key_id=aws_access_key_id,
@@ -104,7 +113,7 @@ class BedrockClient:
             region_name=aws_region,
         )
         
-        bedrock_runtime = session.client('bedrock-runtime')
+        bedrock_runtime = session.client('bedrock-runtime', config=boto_config)
         _LOGGER.info("✅ Bedrock client initialized with region %s", aws_region)
         return bedrock_runtime
 
@@ -714,17 +723,9 @@ class BedrockClient:
                         accept="application/json",
                         body=json_body.encode("utf-8"),
                     )
-                    body_stream = response["body"]
-                    chunks = []
-                    while True:
-                        chunk = body_stream.read(8192)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-
-                    response_bytes = b"".join(chunks)
-                    response_text = response_bytes.decode("utf-8")
-                    parsed_response = json.loads(response_text)
+                    # Read the full response body at once
+                    response_bytes = response["body"].read()
+                    parsed_response = json.loads(response_bytes)
 
                     if "content" in parsed_response and parsed_response["content"]:
                         first_block = parsed_response["content"][0]
@@ -737,11 +738,12 @@ class BedrockClient:
                     return parsed_response
 
                 try:
-                    async with asyncio.timeout(30.0):
+                    async with asyncio.timeout(120.0):
                         response_body = await self.hass.async_add_executor_job(invoke_and_read)
                 except asyncio.TimeoutError:
+                    _LOGGER.error("❌ Bedrock invoke_model timed out. Check network connectivity to AWS.")
                     raise HomeAssistantError(
-                        "Bedrock API call timed out after 30 seconds"
+                        "Bedrock API call timed out. Check network connectivity to AWS."
                     )
             else:
                 # Use Converse API for non-Anthropic models (Nova, Llama, Mistral, DeepSeek)
@@ -859,11 +861,12 @@ class BedrockClient:
                     }
 
                 try:
-                    async with asyncio.timeout(30.0):
+                    async with asyncio.timeout(120.0):
                         response_body = await self.hass.async_add_executor_job(converse_call)
                 except asyncio.TimeoutError:
+                    _LOGGER.error("❌ Bedrock Converse API timed out. Check network connectivity to AWS.")
                     raise HomeAssistantError(
-                        "Bedrock Converse API call timed out after 30 seconds"
+                        "Bedrock Converse API call timed out. Check network connectivity to AWS."
                     )
 
             stop_reason = response_body.get("stop_reason")
