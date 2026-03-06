@@ -259,39 +259,87 @@ class BedrockConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for AWS Bedrock Conversation."""
 
+    def __init__(self) -> None:
+        """Initialize options flow."""
+        self._selected_region: str | None = None
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.FlowResult:
-        """Manage the options."""
+        """Step 1: Select AWS region."""
         if user_input is not None:
+            self._selected_region = user_input[CONF_AWS_REGION]
+            return await self.async_step_options()
+
+        current_region = self.config_entry.options.get(
+            CONF_AWS_REGION,
+            self.config_entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
+        )
+
+        region_schema = vol.Schema({
+            vol.Required(
+                CONF_AWS_REGION,
+                default=current_region
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="us-east-1", label="US East (N. Virginia)"),
+                        selector.SelectOptionDict(value="us-west-2", label="US West (Oregon)"),
+                        selector.SelectOptionDict(value="us-east-2", label="US East (Ohio)"),
+                        selector.SelectOptionDict(value="eu-central-1", label="Europe (Frankfurt)"),
+                        selector.SelectOptionDict(value="eu-west-1", label="Europe (Ireland)"),
+                        selector.SelectOptionDict(value="eu-west-2", label="Europe (London)"),
+                        selector.SelectOptionDict(value="eu-west-3", label="Europe (Paris)"),
+                        selector.SelectOptionDict(value="ap-southeast-1", label="Asia Pacific (Singapore)"),
+                        selector.SelectOptionDict(value="ap-northeast-1", label="Asia Pacific (Tokyo)"),
+                        selector.SelectOptionDict(value="ap-south-1", label="Asia Pacific (Mumbai)"),
+                        selector.SelectOptionDict(value="ap-southeast-2", label="Asia Pacific (Sydney)"),
+                        selector.SelectOptionDict(value="ca-central-1", label="Canada (Central)"),
+                        selector.SelectOptionDict(value="sa-east-1", label="South America (São Paulo)"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        })
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=region_schema,
+            description_placeholders={"current_region": current_region},
+        )
+
+    async def async_step_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.FlowResult:
+        """Step 2: Configure model and parameters."""
+        if user_input is not None:
+            # Merge region into the saved options
+            user_input[CONF_AWS_REGION] = self._selected_region
             return self.async_create_entry(title="", data=user_input)
 
         # Get available LLM APIs with error handling
         try:
             llm_api_ids = [
-                api.id for api in llm.async_get_apis(self.hass) 
-                if api.id != "nlsql"  # Exclude nlsql as it requires special setup
+                api.id for api in llm.async_get_apis(self.hass)
+                if api.id != "nlsql"
             ]
         except Exception as e:
             _LOGGER.warning("Error getting LLM APIs: %s", e)
             llm_api_ids = []
-        
-        # Ensure we always have at least the default API in the list
+
         if HOME_LLM_API_ID not in llm_api_ids:
             llm_api_ids.append(HOME_LLM_API_ID)
-        
-        # If list is still empty, add a fallback
         if not llm_api_ids:
             llm_api_ids = [HOME_LLM_API_ID]
-        
-        # Get available models for the current region
-        available_models = AVAILABLE_MODELS  # Default fallback
+
+        # Dynamically fetch models for the selected region
+        aws_region = self._selected_region
+        available_models = AVAILABLE_MODELS  # Fallback
         try:
-            aws_region = self.config_entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
             aws_access_key_id = self.config_entry.data.get(CONF_AWS_ACCESS_KEY_ID)
             aws_secret_access_key = self.config_entry.data.get(CONF_AWS_SECRET_ACCESS_KEY)
             aws_session_token = self.config_entry.data.get(CONF_AWS_SESSION_TOKEN)
-            
+
             if aws_access_key_id and aws_secret_access_key:
                 _LOGGER.info("🔍 Fetching available models for region: %s", aws_region)
                 available_models = await get_available_models_for_region(
@@ -299,19 +347,19 @@ class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
                     aws_access_key_id,
                     aws_secret_access_key,
                     aws_session_token,
-                    aws_region
+                    aws_region,
                 )
                 _LOGGER.info("✅ Found %d models in region %s", len(available_models), aws_region)
             else:
                 _LOGGER.warning("⚠️ Missing AWS credentials, using static model list")
         except Exception as e:
             _LOGGER.error("❌ Error fetching models for region, using static list: %s", e)
-        
+
         # Ensure current model is in the list
         current_model = self.config_entry.options.get(CONF_MODEL_ID, DEFAULT_MODEL_ID)
         if current_model not in available_models:
             available_models.insert(0, current_model)
-        
+
         options_schema = vol.Schema({
             vol.Optional(
                 CONF_MODEL_ID,
@@ -397,8 +445,9 @@ class BedrockConversationOptionsFlow(config_entries.OptionsFlow):
                 )
             ),
         })
-        
+
         return self.async_show_form(
-            step_id="init",
-            data_schema=options_schema
+            step_id="options",
+            data_schema=options_schema,
+            description_placeholders={"region": aws_region},
         )

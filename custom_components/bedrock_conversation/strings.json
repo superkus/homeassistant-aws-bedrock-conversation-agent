@@ -8,8 +8,7 @@
           "aws_region": "AWS Region",
           "aws_access_key_id": "AWS Access Key ID",
           "aws_secret_access_key": "AWS Secret Access Key",
-          "aws_session_token": "AWS Session Token (optional)",
-          "model_id": "Bedrock Model ID"
+          "aws_session_token": "AWS Session Token (optional)"
         }
       }
     },
@@ -26,9 +25,17 @@
   "options": {
     "step": {
       "init": {
-        "title": "AWS Bedrock Options",
+        "title": "AWS Region",
+        "description": "Select the AWS region. Models will be fetched for this region in the next step.",
         "data": {
-          "model_id": "Bedrock Model ID",
+          "aws_region": "AWS Region"
+        }
+      },
+      "options": {
+        "title": "AWS Bedrock Options",
+        "description": "Models loaded for region: {region}",
+        "data": {
+          "model": "Bedrock Model",
           "selected_language": "Language",
           "prompt": "System Prompt Template",
           "max_tokens": "Max Tokens",

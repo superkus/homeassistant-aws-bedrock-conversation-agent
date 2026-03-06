@@ -93,10 +93,13 @@ class BedrockClient:
         # boto3 signature errors when no temporary credentials are used.
         aws_session_token = self.entry.data.get(CONF_AWS_SESSION_TOKEN) or None
         
-        # Get region - try entry.options first, then entry.data, then default
+        # Get region - try options first (user can change it), then data, then default
         aws_region = options.get(
             CONF_AWS_REGION, 
             self.entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION))
+        
+        # Store current region for change detection
+        self._current_region = aws_region
         
         # Configure boto3 with explicit timeouts to prevent hanging
         boto_config = Config(
@@ -119,6 +122,15 @@ class BedrockClient:
 
     async def _ensure_client(self) -> None:
         """Ensure the Bedrock client is initialized (lazy initialization)."""
+        # Check if region has changed and client needs to be recreated
+        current_region = self.entry.options.get(
+            CONF_AWS_REGION,
+            self.entry.data.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
+        )
+        if self._bedrock_runtime is not None and hasattr(self, '_current_region') and self._current_region != current_region:
+            _LOGGER.info("🔄 Region changed from %s to %s, recreating client", self._current_region, current_region)
+            self._bedrock_runtime = None
+        
         if self._bedrock_runtime is None:
             async with self._client_lock:
                 # Double-check after acquiring lock
