@@ -161,6 +161,16 @@ def _profile_preference(region: str) -> list[str]:
     return ["us", "global"]
 
 
+def _strip_temperature(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of Converse kwargs without inference temperature."""
+    kwargs = copy.copy(kwargs)
+    if "inferenceConfig" in kwargs:
+        inference_config = dict(kwargs["inferenceConfig"])
+        inference_config.pop("temperature", None)
+        kwargs["inferenceConfig"] = inference_config
+    return kwargs
+
+
 def _strip_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of Converse kwargs without prompt cache points."""
     kwargs = copy.copy(kwargs)
@@ -188,6 +198,8 @@ class BedrockClient:
         }
         self._runtime: Any = None
         self._control: Any = None
+        # Models that rejected temperature; newer reasoning models deprecate it.
+        self._no_temperature_models: set[str] = set()
         # Models that rejected prompt cache points; skip caching for them.
         self._no_cache_models: set[str] = set()
         # model id -> inference profile id that worked for it.
@@ -311,22 +323,81 @@ class BedrockClient:
             async for event in self._async_converse_stream(kwargs):
                 yield event
 
+    def _apply_remembered_overrides(self, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Copy Converse kwargs and apply fallbacks remembered for the original model."""
+        model_id = kwargs["modelId"]
+        prepared_kwargs = dict(kwargs)
+        if model_id in self._profile_overrides:
+            prepared_kwargs["modelId"] = self._profile_overrides[model_id]
+        if model_id in self._no_temperature_models:
+            prepared_kwargs = _strip_temperature(prepared_kwargs)
+        if model_id in self._no_cache_models:
+            prepared_kwargs = _strip_cache_points(prepared_kwargs)
+        return model_id, prepared_kwargs
+
+    async def _async_apply_validation_fallback(
+        self,
+        error: BedrockError,
+        original_model_id: str,
+        kwargs: dict[str, Any],
+        attempted_fallbacks: set[str],
+    ) -> dict[str, Any] | None:
+        """Apply the next compatible fallback, or return None when none matches."""
+        message = error.message.lower()
+        if (
+            "inference profile" in message
+            and "profile" not in attempted_fallbacks
+            and not kwargs["modelId"].startswith((*_REGIONAL_PROFILE_PREFIXES, "arn:"))
+        ):
+            attempted_fallbacks.add("profile")
+            profile = await self._async_find_profile(kwargs["modelId"])
+            if profile is None:
+                return None
+            LOGGER.info(
+                "Model %s needs an inference profile; using %s",
+                original_model_id,
+                profile,
+            )
+            self._profile_overrides[original_model_id] = profile
+            kwargs["modelId"] = profile
+            return kwargs
+
+        if (
+            "temperature" in message
+            and any(word in message for word in ("deprecated", "unsupported", "not supported"))
+            and "temperature" not in attempted_fallbacks
+        ):
+            attempted_fallbacks.add("temperature")
+            LOGGER.info(
+                "Model %s does not accept temperature; disabling it",
+                original_model_id,
+            )
+            self._no_temperature_models.add(original_model_id)
+            return _strip_temperature(kwargs)
+
+        # Loose match on purpose: AWS words this differently per model
+        # ("cache", "caching", "cachePoint").
+        if "cach" in message and "cache" not in attempted_fallbacks:
+            attempted_fallbacks.add("cache")
+            LOGGER.info(
+                "Model %s does not support prompt caching; disabling it",
+                original_model_id,
+            )
+            self._no_cache_models.add(original_model_id)
+            return _strip_cache_points(kwargs)
+
+        return None
+
     async def _async_converse_stream(self, kwargs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """Stream events, applying configuration fallbacks before the first one.
 
-        Before any event has been yielded, two configuration problems are
-        fixed transparently and the call is retried once each:
-        a model that needs an inference profile, and a model that does not
-        support prompt caching.
+        Before any event has been yielded, three model-compatibility problems
+        are fixed transparently and the call is retried once each: a model that
+        needs an inference profile, a model that rejects temperature, and a
+        model that does not support prompt caching.
         """
-        model_id = kwargs["modelId"]
-        kwargs = dict(kwargs)
-        if model_id in self._profile_overrides:
-            kwargs["modelId"] = self._profile_overrides[model_id]
-        if model_id in self._no_cache_models:
-            kwargs = _strip_cache_points(kwargs)
-
-        tried_profile = tried_cache = False
+        model_id, kwargs = self._apply_remembered_overrides(kwargs)
+        attempted_fallbacks: set[str] = set()
         while True:
             yielded = False
             try:
@@ -337,36 +408,12 @@ class BedrockClient:
             except BedrockError as err:
                 if yielded or err.code != "ValidationException":
                     raise
-                message = err.message.lower()
-                if (
-                    "inference profile" in message
-                    and not tried_profile
-                    and not kwargs["modelId"].startswith((*_REGIONAL_PROFILE_PREFIXES, "arn:"))
-                ):
-                    tried_profile = True
-                    profile = await self._async_find_profile(kwargs["modelId"])
-                    if profile is None:
-                        raise
-                    LOGGER.info(
-                        "Model %s needs an inference profile; using %s",
-                        model_id,
-                        profile,
-                    )
-                    self._profile_overrides[model_id] = profile
-                    kwargs["modelId"] = profile
-                    continue
-                # Loose match on purpose: AWS words this differently per model
-                # ("cache", "caching", "cachePoint").
-                if "cach" in message and not tried_cache:
-                    tried_cache = True
-                    LOGGER.info(
-                        "Model %s does not support prompt caching; disabling it",
-                        model_id,
-                    )
-                    self._no_cache_models.add(model_id)
-                    kwargs = _strip_cache_points(kwargs)
-                    continue
-                raise
+                updated_kwargs = await self._async_apply_validation_fallback(
+                    err, model_id, kwargs, attempted_fallbacks
+                )
+                if updated_kwargs is None:
+                    raise
+                kwargs = updated_kwargs
 
     async def _async_stream_once(self, kwargs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         if self._runtime is None:

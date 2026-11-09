@@ -106,12 +106,14 @@ BEDROCK_MAX_CONCURRENT_STREAMS: Final = 2
 # Bound events buffered between botocore's worker thread and the event loop.
 BEDROCK_STREAM_QUEUE_MAXSIZE: Final = 16
 # A model may still emit one tool block per device. The raw cap bounds parsing;
-# homogeneous HassCallService blocks are collapsed before execution.
+# homogeneous HassCallService and HassGetState blocks collapse before the operation cap.
 MAX_TOOL_CALLS_PER_RESPONSE: Final = 128
 # HA creates one task per non-collapsible operation. Keep that fan-out small.
 MAX_TOOL_OPERATIONS_PER_RESPONSE: Final = 10
 # One bulk Home Assistant service call may target this many exposed entities.
 MAX_SERVICE_TARGETS: Final = 100
+# One bulk state read uses the same bounded target size.
+MAX_STATE_TARGETS: Final = 100
 # Pending confirmations expire so a stale "yes" cannot trigger an old request.
 CONFIRMATION_TIMEOUT: Final = 120
 

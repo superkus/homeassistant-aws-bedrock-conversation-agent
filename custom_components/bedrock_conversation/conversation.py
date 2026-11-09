@@ -50,9 +50,11 @@ from .const import (
     DEFAULT_TEMPERATURE,
     DOMAIN,
     LOGGER,
+    MAX_STATE_TARGETS,
     MAX_TOOL_CALLS_PER_RESPONSE,
     MAX_TOOL_OPERATIONS_PER_RESPONSE,
     SERVICE_TOOL_NAME,
+    STATE_TOOL_NAME,
     SUBENTRY_CONVERSATION,
     TURN_TIMEOUT,
     exposure_bounded_llm_api_ids,
@@ -77,57 +79,71 @@ _FAILED_STOP_REASONS = {
 
 @dataclass(slots=True)
 class _ToolOperation:
-    """One operation after collapsing homogeneous service calls."""
+    """One operation after collapsing homogeneous service or state calls."""
 
     call: llm.ToolInput
     originals: list[llm.ToolInput]
     execute_here: bool = False
+    kind: str | None = None
 
 
 def _tool_operations(calls: list[llm.ToolInput]) -> list[_ToolOperation]:
-    """Collapse per-device HassCallService calls into bounded bulk operations.
+    """Collapse per-device custom API calls into bounded bulk operations.
 
     Original calls remain in the assistant message so every Bedrock tool-use ID
     receives a result. Collapsible calls are marked external and executed once
     here; all other tools retain Home Assistant's normal execution path.
     """
     operations: list[_ToolOperation] = []
-    service_groups: dict[str, _ToolOperation] = {}
+    groups: dict[str, _ToolOperation] = {}
+    target_fields = {
+        SERVICE_TOOL_NAME: ("target_device", "target_devices"),
+        STATE_TOOL_NAME: ("entity_id", "entity_ids"),
+    }
 
     for call in calls:
-        if call.tool_name.rsplit("__", 1)[-1] != SERVICE_TOOL_NAME:
+        kind = call.tool_name.rsplit("__", 1)[-1]
+        if (fields := target_fields.get(kind)) is None:
             operations.append(_ToolOperation(call, [call]))
             continue
 
+        singular, plural = fields
         args = dict(call.tool_args)
-        target_device = args.pop("target_device", None)
-        target_devices = args.pop("target_devices", None)
-        if (target_device is None) == (target_devices is None):
+        has_one = singular in args
+        has_many = plural in args
+        if has_one == has_many:
             operations.append(_ToolOperation(call, [call]))
             continue
-        targets = [target_device] if target_device is not None else target_devices
+        one = args.pop(singular) if has_one else None
+        many = args.pop(plural) if has_many else None
+        targets = [one] if has_one else many
         if not isinstance(targets, list) or not all(isinstance(target, str) for target in targets):
+            operations.append(_ToolOperation(call, [call]))
+            continue
+        if kind == STATE_TOOL_NAME and has_many and not 1 <= len(targets) <= MAX_STATE_TARGETS:
             operations.append(_ToolOperation(call, [call]))
             continue
 
         key = json.dumps([call.tool_name, args], sort_keys=True, default=str)
-        if (operation := service_groups.get(key)) is None:
-            canonical_args = {**args, "target_devices": []}
+        if (operation := groups.get(key)) is None:
+            canonical_args = {**args, plural: []}
             operation = _ToolOperation(
                 llm.ToolInput(tool_name=call.tool_name, tool_args=canonical_args),
                 [],
                 execute_here=True,
+                kind=kind,
             )
-            service_groups[key] = operation
+            groups[key] = operation
             operations.append(operation)
         operation.originals.append(call)
-        operation.call.tool_args["target_devices"].extend(targets)
+        operation.call.tool_args[plural].extend(targets)
         call.external = True
 
-    for operation in service_groups.values():
-        operation.call.tool_args["target_devices"] = list(
-            dict.fromkeys(operation.call.tool_args["target_devices"])
-        )
+    for operation in groups.values():
+        if operation.kind is None:
+            raise RuntimeError("Grouped tool operation has no kind")
+        plural = target_fields[operation.kind][1]
+        operation.call.tool_args[plural] = list(dict.fromkeys(operation.call.tool_args[plural]))
     return operations
 
 
@@ -508,7 +524,7 @@ class _DeltaStream:
         if calls:
             yield {"tool_calls": calls}
 
-        # Valid HassCallService operations are executed here after collapsing,
+        # Valid custom API operations are executed here after collapsing,
         # rather than letting HA create one task per original model call.
         if immediate:
             llm_api = self._chat_log.llm_api
@@ -520,10 +536,10 @@ class _DeltaStream:
                 llm_api, [operation.call for operation in immediate]
             )
             for operation, result in zip(immediate, results, strict=True):
-                if len(operation.originals) > 1 and not result.error:
-                    result = _compact_grouped_result(result)
                 for original in operation.originals:
-                    yield _tool_result_from_result(original, result)
+                    yield _tool_result_from_result(
+                        original, _result_for_original(operation, original, result)
+                    )
 
         if not held:
             return
@@ -558,6 +574,43 @@ class _DeltaStream:
             tool_name=self._names.to_ha.get(block["name"], block["name"]),
             tool_args=args if isinstance(args, dict) else {},
         )
+
+
+def _result_for_original(
+    operation: _ToolOperation,
+    original: llm.ToolInput,
+    result: llm.ToolResult,
+) -> llm.ToolResult:
+    """Tailor one collapsed result to the original Bedrock call."""
+    if result.error:
+        return result
+    if operation.kind == SERVICE_TOOL_NAME:
+        return _compact_grouped_result(result) if len(operation.originals) > 1 else result
+    if operation.kind != STATE_TOOL_NAME:
+        return result
+
+    entities = result.data.get("entities")
+    if not isinstance(entities, list):
+        return result
+    by_id = {
+        item.get("entity_id"): item
+        for item in entities
+        if isinstance(item, dict) and isinstance(item.get("entity_id"), str)
+    }
+    if isinstance(entity_id := original.tool_args.get("entity_id"), str):
+        return llm.ToolResult(data=by_id.get(entity_id, {"error": "State unavailable"}))
+    entity_ids = original.tool_args.get("entity_ids")
+    if isinstance(entity_ids, list):
+        return llm.ToolResult(
+            data={
+                "entities": [
+                    by_id[entity_id]
+                    for entity_id in dict.fromkeys(entity_ids)
+                    if entity_id in by_id
+                ]
+            }
+        )
+    return result
 
 
 def _compact_grouped_result(result: llm.ToolResult) -> llm.ToolResult:

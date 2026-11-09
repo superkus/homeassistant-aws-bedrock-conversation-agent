@@ -9,6 +9,7 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant.common import async_mock_service
 
+from custom_components.bedrock_conversation.const import MAX_STATE_TARGETS
 from custom_components.bedrock_conversation.llm_api import (
     BedrockServicesAPI,
     HassGetStateTool,
@@ -202,3 +203,81 @@ async def test_bulk_target_shape_is_bounded(hass: HomeAssistant, args: dict[str,
     result = await _call(hass, **args)
     assert result.error
     assert not calls
+
+
+@pytest.mark.usefixtures("setup")
+async def test_get_state_bulk_is_atomic(hass: HomeAssistant) -> None:
+    """Many exposed states are returned in one bounded read."""
+    targets = [f"cover.shade_{index}" for index in range(75)]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(entity_id, "open" if index % 2 else "closed")
+        async_expose_entity(hass, "conversation", entity_id, True)
+    tool = HassGetStateTool()
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name=tool.name, tool_args={"entity_ids": targets}),
+        _context(),
+    )
+
+    assert not result.error
+    assert [item["entity_id"] for item in result.data["entities"]] == targets
+    assert result.data["entities"][0]["state"] == "closed"
+    assert result.data["entities"][1]["state"] == "open"
+
+    hidden = await tool.async_call(
+        hass,
+        llm.ToolInput(
+            tool_name=tool.name,
+            tool_args={"entity_ids": [targets[0], "switch.hidden"]},
+        ),
+        _context(),
+    )
+    assert hidden.error
+    assert "Unknown device" in hidden.data["error"]
+
+
+@pytest.mark.usefixtures("setup")
+@pytest.mark.parametrize("target_count", [1, MAX_STATE_TARGETS])
+async def test_get_state_bulk_accepts_valid_boundary_sizes(
+    hass: HomeAssistant, target_count: int
+) -> None:
+    """Bulk state reads accept the minimum and maximum number of entities."""
+    targets = [f"sensor.boundary_{index}" for index in range(target_count)]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(entity_id, str(index))
+        async_expose_entity(hass, "conversation", entity_id, True)
+    tool = HassGetStateTool()
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name=tool.name, tool_args={"entity_ids": targets}),
+        _context(),
+    )
+
+    assert not result.error
+    assert result.data["entities"] == [
+        {"entity_id": entity_id, "state": str(index), "attributes": []}
+        for index, entity_id in enumerate(targets)
+    ]
+
+
+@pytest.mark.usefixtures("setup")
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"entity_id": "light.lamp", "entity_ids": ["light.lamp"]},
+        {"entity_ids": []},
+        {"entity_ids": [f"sensor.item_{index}" for index in range(101)]},
+    ],
+)
+async def test_get_state_bulk_shape_is_bounded(
+    hass: HomeAssistant, args: dict[str, object]
+) -> None:
+    """State reads require exactly one bounded entity field."""
+    tool = HassGetStateTool()
+    result = await tool.async_call(
+        hass, llm.ToolInput(tool_name=tool.name, tool_args=args), _context()
+    )
+    assert result.error

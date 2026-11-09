@@ -47,10 +47,11 @@ class FakeEventStream:
 
 
 TEXT_DELTA = {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hola"}}}
-# Messages that would trigger the profile / prompt-cache retries before any event.
+# Messages that would trigger a compatibility retry before any event.
 RETRYABLE_MESSAGES = [
     "Retry your request with the ID or ARN of an inference profile",
     "This model doesn't support prompt caching",
+    "The `temperature` field is unsupported for this model",
 ]
 
 
@@ -370,3 +371,80 @@ async def test_stream_bridge_backpressures_and_releases_on_close(client: Bedrock
     async with asyncio.timeout(1):
         await events.aclose()
     await _wait_until(stream.closed.is_set)
+
+
+@pytest.mark.parametrize("wording", ["deprecated", "unsupported", "not supported"])
+async def test_temperature_fallback_is_remembered(client: BedrockClient, wording: str) -> None:
+    """Reasoning models are retried once and later called without temperature."""
+    client._runtime.converse_stream.side_effect = [
+        _client_error(
+            "ValidationException",
+            f"The model returned the following errors: `temperature` is {wording} for this model.",
+        ),
+        {"stream": FakeEventStream([{"messageStart": {}}])},
+        {"stream": FakeEventStream([{"messageStart": {}}])},
+    ]
+    kwargs = {
+        "modelId": "eu.anthropic.claude-opus-5-5",
+        "inferenceConfig": {"maxTokens": 4096, "temperature": 0.5},
+    }
+
+    await _collect(client, kwargs)
+    assert client._runtime.converse_stream.call_count == 2
+    assert client._runtime.converse_stream.call_args.kwargs["inferenceConfig"] == {
+        "maxTokens": 4096
+    }
+    assert kwargs["inferenceConfig"]["temperature"] == 0.5  # caller not mutated
+
+    await _collect(client, kwargs)
+    assert client._runtime.converse_stream.call_count == 3
+    assert client._runtime.converse_stream.call_args.kwargs["inferenceConfig"] == {
+        "maxTokens": 4096
+    }
+
+
+async def test_temperature_fallback_composes_with_profile_and_cache_fallbacks(
+    client: BedrockClient,
+) -> None:
+    """All compatibility fallbacks compose and are remembered for the selected model."""
+    client._runtime.converse_stream.side_effect = [
+        _client_error("ValidationException", "Retry with the ID of an inference profile"),
+        _client_error("ValidationException", "The `temperature` field is unsupported"),
+        _client_error("ValidationException", "This model doesn't support prompt caching"),
+        {"stream": FakeEventStream([{"messageStart": {}}])},
+        {"stream": FakeEventStream([{"messageStart": {}}])},
+    ]
+    kwargs = {
+        "modelId": "anthropic.claude-x",
+        "inferenceConfig": {"maxTokens": 4096, "temperature": 0.5},
+        "system": [{"text": "hi"}, {"cachePoint": {"type": "default"}}],
+    }
+
+    await _collect(client, kwargs)
+    await _collect(client, kwargs)
+
+    sent = [call.kwargs for call in client._runtime.converse_stream.call_args_list]
+    assert [request["modelId"] for request in sent] == [
+        "anthropic.claude-x",
+        "eu.anthropic.claude-x",
+        "eu.anthropic.claude-x",
+        "eu.anthropic.claude-x",
+        "eu.anthropic.claude-x",
+    ]
+    assert ["temperature" in request["inferenceConfig"] for request in sent] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert [any("cachePoint" in block for block in request["system"]) for request in sent] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert kwargs["modelId"] == "anthropic.claude-x"
+    assert kwargs["inferenceConfig"]["temperature"] == 0.5
+    assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}

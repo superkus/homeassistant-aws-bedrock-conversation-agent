@@ -86,7 +86,7 @@ Agent settings:
 | Name | AWS Bedrock | Only when adding an agent |
 | Model | (chosen at setup for the first agent) | Model or inference profile; the selector shows metadata fetched for the entry's region and allows custom IDs. Listing an item does not prove that it can be invoked. |
 | Instructions | Home Assistant's default instructions | What the assistant should do and how it should answer. Home Assistant templates are supported. Home Assistant adds the current date and, with device control enabled, the exposed devices; you do not need placeholders for them. Clear the field to go back to the default. |
-| Device control | Device control (Assist) for new installs | Choose one or both exposure-bounded APIs: **Device control** or **AWS Bedrock Services**. Both enforce **Settings → Voice assistants → Expose**. The unrestricted administrative Home Assistant API and arbitrary third-party APIs are not offered. AWS Bedrock Services supplies a snapshot plus `HassCallService` and read-only `HassGetState`; it no longer supplies `media_player.play_media`. Media playback depends on another selected bounded API that provides a playback tool. Empty means chat only. |
+| Device control | Device control (Assist) for new installs | Choose one or both exposure-bounded APIs: **Device control** or **AWS Bedrock Services**. Both enforce **Settings → Voice assistants → Expose**. The unrestricted administrative Home Assistant API and arbitrary third-party APIs are not offered. AWS Bedrock Services supplies a snapshot plus bulk-capable `HassCallService` and read-only `HassGetState` (up to 100 entities each); models that emit one call per entity are grouped automatically. It does not supply `media_player.play_media`. Empty means chat only. |
 | Spoken confirmation | On | Ask before unlocking, opening doors, garages or gates, running scripts and other sensitive actions (see below) |
 | Maximum tokens in a response | 1024 | 64 to 64000. If a reply is cut off by this limit in the middle of a tool call, the assistant says so; raise the value. |
 | Temperature | 0.5 | 0 to 1 |
@@ -122,7 +122,7 @@ What is held:
 - playing a web URL on a media player (searching the media library is not held),
 - state-changing tools from integrations it does not know, for example MCP servers. Their "read-only" hints are not trusted, because they come from the remote server.
 
-For each held action, the question names at most five targets and summarizes the rest ("… and 3 more"). The question can contain several action descriptions. A model response may contain at most 128 raw tool calls. The integration collapses homogeneous `HassCallService` calls into bulk operations, then allows at most 10 distinct operations. If either limit is exceeded, the entire response is rejected before any tool runs.
+For each held action, the question names at most five targets and summarizes the rest ("… and 3 more"). The question can contain several action descriptions. A model response may contain at most 128 raw tool calls. The integration collapses homogeneous `HassCallService` and `HassGetState` calls into bulk operations, then allows at most 10 distinct operations. If either limit is exceeded, the entire response is rejected before any tool runs.
 
 Intents that target devices by area, by the name "all", by a blank name or by a name several devices share are checked against every device they can reach.
 
@@ -161,14 +161,15 @@ logger:
 | "AWS accepted these credentials, but model metadata could not be listed" | IAM policy is missing a model-listing permission | Grant `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` as shown above |
 | "No models could be listed for this region" | Metadata discovery failed or returned no matching active streaming text models or profiles | Type the model or inference profile ID, or choose another region with **Reconfigure** |
 | "Access to this Bedrock model was denied (...)" | The selected model is not accessible in this region, or IAM lacks `bedrock:InvokeModelWithResponseStream` | Check model access in the Bedrock console and the invocation permission in the IAM policy |
-| "AWS Bedrock returned an error (ValidationException)" | Often a model that does not support tool use or streaming | In **Reconfigure agent**, choose another model or remove device control |
+| "AWS Bedrock returned an error (ValidationException)" | Often a model parameter, tool schema, or message-history incompatibility | Check the Home Assistant log for the full AWS validation message; choose another model if the integration cannot adapt automatically |
+| `temperature` is deprecated for this model | Newer reasoning model does not accept temperature | The integration retries without temperature and remembers that choice automatically |
 | "The answer was blocked by a content filter." | Bedrock stopped the response because of a model content policy or configured guardrail | Rephrase the request; if you configured a Bedrock guardrail, review its policy |
 | "AWS Bedrock took too long to answer." | A whole request, including all tool rounds, took more than 60 seconds | In **Reconfigure agent**, use a faster model or lower the maximum tokens or tool rounds |
 | "Could not reach AWS Bedrock." | No connection to AWS, or AWS sent nothing for 15 seconds (connect timeout 5 seconds, one retry) | Check the network connection to AWS |
 | "I could not complete that request." | The model used all its tool rounds | Raise **Maximum tool rounds per request** in **Reconfigure agent**, or rephrase |
 | "The model sent an invalid tool request." | The model returned malformed JSON for a tool call | Rephrase the request or choose a model that reliably supports tool use |
 | "The model sent too many tool requests in one response (maximum 128). No tools were run." | The model exceeded the absolute raw-call safety limit | Rephrase the request; the rejected batch did not run |
-| "The model requested too many distinct tool operations in one response (maximum 10). No tools were run." | More than ten operations remained after identical service calls were grouped | Ask for fewer different actions at once; the rejected batch did not run |
+| "The model requested too many distinct tool operations in one response (maximum 10). No tools were run." | More than ten operations remained after homogeneous service calls and state reads were grouped | Ask for fewer different actions at once; the rejected batch did not run |
 | An action through **AWS Bedrock Services** fails, or the model reports that it did not finish within 10 seconds | `HassCallService` received a Home Assistant service error, or its blocking service call exceeded the 10-second execution limit | Check the Home Assistant log and try the service directly. The tool returns a failure result to the model instead of reporting success. |
 | "The conversation is too long for this model." | Context window full | Start a new conversation |
 | "The answer was cut off by the token limit." | The reply hit **Maximum tokens in a response** in the middle of a tool call | Raise **Maximum tokens in a response** in **Reconfigure agent** |
