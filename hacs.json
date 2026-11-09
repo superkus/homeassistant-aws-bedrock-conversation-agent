@@ -2,6 +2,5 @@
   "name": "AWS Bedrock Conversation",
   "content_in_root": false,
   "render_readme": true,
-  "domains": ["conversation"],
-  "homeassistant": "2024.12.0"
+  "homeassistant": "2026.11.0"
 }

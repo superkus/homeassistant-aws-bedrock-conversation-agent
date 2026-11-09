@@ -1,193 +1,76 @@
-# Testing the Light Control Fix
+# Manual Testing Guide
 
-## Quick Test Procedure
+A checklist for trying a build in a real Home Assistant 2026.11.0+ instance with real AWS credentials. The automated tests are described in [tests/README.md](tests/README.md).
 
-### 1. Restart Home Assistant
-After updating the code, restart Home Assistant to load the new version:
-```bash
-# If running in Docker
-docker restart homeassistant
+## Preparation
 
-# If running as a service
-sudo systemctl restart home-assistant@homeassistant.service
+1. Make a Home Assistant backup if the instance matters to you.
+2. Copy `custom_components/bedrock_conversation` into `config/custom_components/` and restart Home Assistant.
+3. Enable debug logging and restart again:
 
-# Or restart from the UI
-Settings → System → Restart
-```
-
-### 2. Enable Debug Logging (Optional but Recommended)
-
-Edit `configuration.yaml`:
-```yaml
-logger:
-  default: info
-  logs:
-    custom_components.bedrock_conversation: debug
-```
-
-Restart Home Assistant again after making this change.
-
-### 3. Test Device Control
-
-Try these commands with your conversation agent:
-
-✅ **Basic Light Control**
-- "Turn on the kitchen light"
-- "Turn off the bedroom light"
-- "Dim the living room light to 50%"
-- "Set the hallway light to red"
-
-✅ **Other Device Types**
-- "Turn on the fan"
-- "Set thermostat to 72 degrees"
-- "Close the garage door"
-
-✅ **Non-Device Queries (should still work)**
-- "What lights do I have?"
-- "What's the temperature in the bedroom?"
-- "Tell me about my devices"
-
-### 4. Expected Behavior
-
-**Before the fix:**
-- UI shows "..." spinning indefinitely
-- No response ever comes back
-- Light may or may not turn on
-- Have to reload the page to stop the spinning
-
-**After the fix:**
-- UI shows "..." for 1-3 seconds
-- Response appears with confirmation message
-- Light turns on/off as expected
-- Can immediately ask another question
-
-### 5. Check Logs
-
-If you enabled debug logging, check `home-assistant.log`:
-
-```bash
-tail -f /config/home-assistant.log | grep bedrock_conversation
-```
-
-**Success indicators:**
-```
-DEBUG: Found tool use 'HassCallService' with ID: toolu_01ABC123
-DEBUG: Executing tool: HassCallService with args: {'service': 'light.turn_on', ...}
-DEBUG: Tool HassCallService completed with result: {'result': 'success', ...} (using ID: toolu_01ABC123)
-DEBUG: Bedrock response - stop_reason: end_turn, content_blocks: 1
-```
-
-**Problem indicators:**
-```
-ERROR: Error calling Bedrock: ...
-ERROR: Timeout waiting for response
-WARNING: Max iterations reached
-```
-
-### 6. Verify Configuration
-
-Settings → Devices & Services → AWS Bedrock Conversation → Configure
-
-Ensure:
-- ✅ **LLM API** is set to "AWS Bedrock Services"
-- ✅ **Max Tool Call Iterations** is at least 10
-- ✅ A valid Claude model is selected (e.g., claude-3-5-sonnet)
-- ✅ AWS credentials are valid
-
-### 7. Test Edge Cases
-
-Once basic control works, try:
-
-**Multiple devices:**
-- "Turn on all the lights"
-- "Turn off the bedroom light and turn on the kitchen light"
-
-**Complex commands:**
-- "Dim the living room light to 20% and set it to blue"
-- "Turn on the fan and set it to medium speed"
-
-**Error cases:**
-- "Turn on the nonexistent light" (should get error message, not spin)
-- "Set the light to 999%" (should handle gracefully)
-
-## Troubleshooting
-
-### Still Spinning?
-
-1. **Check entity exposure**: 
-   - Go to Settings → Voice assistants → Expose tab
-   - Make sure the lights you're trying to control are checked
-
-2. **Verify AWS credentials**:
-   ```bash
-   aws bedrock list-foundation-models --region YOUR_REGION
+   ```yaml
+   logger:
+     logs:
+       custom_components.bedrock_conversation: debug
    ```
 
-3. **Check Bedrock model access**:
-   - Ensure you have access to the selected Claude model
-   - Try switching to a different model (e.g., claude-3-haiku)
+4. Expose a few test entities in **Settings → Voice assistants → Expose**: a light, a switch, a lock, a garage door or gate cover, and a script.
 
-4. **Look for errors in logs**:
-   ```bash
-   grep -i error /config/home-assistant.log | grep bedrock
-   ```
+## Setup and configuration
 
-### Works But Response is Slow?
+- [ ] Add the integration: the region list appears, wrong credentials show "AWS rejected these credentials", valid ones lead to the model list for that region.
+- [ ] The model list shows inference profiles first, then base models; typing a custom ID is accepted.
+- [ ] After setup the entry has one **Conversation agent** named "AWS Bedrock"; there is no **Configure** button.
+- [ ] **Add agent** with another model and name: a second conversation entity appears and answers; both share the credentials.
+- [ ] **Reconfigure agent** shows that agent's settings and saves them; the integration reloads and the other agent is unchanged.
+- [ ] **Reconfigure** to another region: the model list is fetched for the new region, the chosen model is set on every agent (with the same region, no model is asked and every agent keeps its model), and an automatic title changes to `AWS Bedrock (<region>)` (a custom title is kept).
+- [ ] With the entry not loaded (for example wrong credentials), **Add agent** stops with "The integration is not loaded. Check the credentials first."
+- [ ] With a 1.x entry (restore a 1.x backup on a test instance, then update): the log shows `Migrated <entry id> to version 2.1` and then `Migrated <entry id> to version 3.1 (agent moved to a sub-entry)`; the entry has one agent titled like the entry, keeps its conversation entity ID and a custom title, voice assistants using it still answer, and the removed options and placeholders are gone. A prompt containing `{{ … }}` is kept literally (wrapped in `{% raw %}`).
+- [ ] **Reconfigure agent**, clear **Instructions** and save: Home Assistant's default instructions are back.
 
-- This is normal for Bedrock API calls (1-3 seconds)
-- Consider using a faster model like claude-3-haiku
-- Check your AWS region latency
+## Conversation
 
-### Gets Wrong Device?
+Use **Device control** (Assist API) first, then repeat the device tests with **AWS Bedrock Services**.
 
-The LLM is doing fuzzy matching on device names. If it picks the wrong one:
-- Make device names more distinct (rename in Home Assistant)
-- Be more specific in your command ("kitchen ceiling light" vs. "kitchen light")
-- Check the system prompt to see what names the LLM sees
+- [ ] "Hello, what can you do?": the answer streams in and nothing is changed.
+- [ ] "Turn on the kitchen light", "Dim the living room light to 30 %", "Turn off the switch".
+- [ ] "Which lights are on?": answered from the exposed devices.
+- [ ] Follow-up: "And turn it off again": the agent remembers the previous turn.
+- [ ] A non-existent or unexposed device: a clear answer, nothing changes.
+- [ ] Device control empty in the agent settings: chat-only answers, no device actions.
+- [ ] With **AWS Bedrock Services**: change a light by hand, then ask "Is the kitchen light on?": the answer uses `HassGetState` and is current.
+- [ ] With **Prefer handling commands locally** on: "Turn on the kitchen light" (handled locally), then a follow-up the local agent cannot handle: the Bedrock agent answers without an error.
+- [ ] An announcement that starts a conversation (`assist_satellite.start_conversation`): the reply is answered without an error.
 
-### Tool Call Fails?
+## Spoken confirmation
 
-Check the error message. Common issues:
-- **"Service domain not allowed"**: The service isn't in the allowlist (modify `const.py`)
-- **"Entity not found"**: The device isn't exposed or doesn't exist
-- **"Permission denied"**: Home Assistant user permissions issue
+Turn off **Prefer handling commands locally** in the voice assistant first; otherwise Home Assistant's built-in agent handles "unlock the front door" itself and no confirmation is asked.
 
-## Success Criteria
+- [ ] "Unlock the front door": the agent says "I need your confirmation to unlock Front door. Shall I go ahead?" (in Spanish: "Necesito tu confirmación para abrir la cerradura …. ¿Lo hago?") and the lock stays locked.
+- [ ] Answer "yes" (or "sí, ábrela"): the lock unlocks.
+- [ ] Repeat and answer "no", "yes?", "ok", "yes, the back door instead" or something else: nothing happens, and asking "did you unlock it?" gets "no".
+- [ ] "In 1 minute, unlock the front door" (a timer with a command): confirmation is asked before the timer is set.
+- [ ] Answer "yes" from another satellite or user, or after more than 2 minutes: nothing happens.
+- [ ] "Open the garage door", "Run the <script>" and a scene that includes a lock: confirmation is asked.
+- [ ] "Close the garage door" and "Lock the front door": run without confirmation.
+- [ ] With **Spoken confirmation** off: sensitive actions run directly.
+- [ ] Another agent (for example a second LLM integration) using **AWS Bedrock Services**: "unlock" is refused.
 
-✅ Lights turn on/off when requested  
-✅ Response comes back within 3 seconds  
-✅ UI shows confirmation message  
-✅ No infinite spinning  
-✅ Can chain multiple commands in a conversation  
-✅ Error messages are displayed properly (not infinite spin)  
+## Errors
 
-## Reporting Issues
+- [ ] Remove `bedrock:InvokeModelWithResponseStream` from the IAM policy: "Access to this Bedrock model was denied (AccessDeniedException)".
+- [ ] Deactivate the access key: the answer says the credentials were rejected and Home Assistant asks to reauthenticate.
+- [ ] A model without tool use and device control enabled: "AWS Bedrock returned an error (ValidationException)".
+- [ ] Set **Maximum tool rounds** to 1 and ask for several actions at once: may end with "I could not complete that request."
+- [ ] Set **Maximum tokens in a response** to 64 and ask for several actions at once: may end with "The answer was cut off by the token limit. Increase …".
 
-If the fix doesn't work:
+## What to look for in the log
 
-1. Capture logs with debug enabled
-2. Note the exact command that fails
-3. Check `FIX_SUMMARY.md` for known issues
-4. Open a GitHub issue with:
-   - Home Assistant version
-   - Integration version
-   - Claude model being used
-   - Debug logs showing the failure
-   - Expected vs. actual behavior
+- `Model <id> needs an inference profile; using <profile>`: the fallback worked.
+- `Model <id> does not support prompt caching; disabling it`: caching was turned off for that model.
+- `Bedrock usage: {...}`: token usage per request (debug).
+- `Access denied by AWS Bedrock`, `AWS rejected the credentials`, `AWS Bedrock error`: the full AWS error behind a spoken message.
 
-## Performance Benchmarks
+## Reporting issues
 
-Expected response times with claude-3-5-sonnet:
-
-| Query Type | Time |
-|------------|------|
-| Non-device query | 1-2s |
-| Single device control | 2-3s |
-| Multiple device control | 3-5s |
-| Complex with attributes | 3-5s |
-
-Times will vary based on:
-- AWS region proximity
-- Selected Claude model
-- Current API load
-- System prompt complexity
+Open a [GitHub issue](https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent/issues) with the Home Assistant and integration versions, region, model ID, the exact request, and the debug log. Remove account IDs and keys from the log first.

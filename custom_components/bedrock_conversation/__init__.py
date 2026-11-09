@@ -1,35 +1,61 @@
-"""AWS Bedrock Conversation integration."""
+"""The AWS Bedrock Conversation integration."""
 
-from dataclasses import dataclass
+from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform, ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import llm
-from homeassistant.exceptions import HomeAssistantError
-import voluptuous as vol
-import logging
 import asyncio
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+import json
+import re
+from typing import Any
 
-# Essential imports
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
+from homeassistant.helpers import device_registry as dr, entity_registry as er, llm
+from homeassistant.util.hass_dict import HassKey
+
+from .client import (
+    BedrockAccessDeniedError,
+    BedrockAuthError,
+    BedrockClient,
+    BedrockError,
+)
 from .const import (
+    CONF_AWS_REGION,
+    CONF_AWS_SESSION_TOKEN,
+    CONF_LLM_HASS_API,
+    CONF_MAX_TOKENS,
+    CONF_MAX_TOOL_CALL_ITERATIONS,
+    CONF_PROMPT,
+    CONF_TEMPERATURE,
+    DEFAULT_AWS_REGION,
     DOMAIN,
     HOME_LLM_API_ID,
-    SERVICE_TOOL_NAME,
-    SERVICE_TOOL_ALLOWED_DOMAINS,
-    SERVICE_TOOL_ALLOWED_SERVICES,
-    ALLOWED_SERVICE_CALL_ARGUMENTS,
+    LOGGER,
+    SUBENTRY_CONVERSATION,
+    default_title,
+    exposure_bounded_llm_api_ids,
+    is_default_title,
 )
-from .bedrock_client import BedrockClient
-
-_LOGGER = logging.getLogger(__name__)
+from .llm_api import BedrockServicesAPI
 
 PLATFORMS = [Platform.CONVERSATION]
+
+# Unregisters the shared "AWS Bedrock Services" API when the last entry unloads.
+_API_UNREGISTER: HassKey[Callable[[], None]] = HassKey(f"{DOMAIN}_api_unregister")
+# Entry ids with a reload already scheduled by the update listener.
+_RELOAD_PENDING: HassKey[set[str]] = HassKey(f"{DOMAIN}_reload_pending")
 
 
 @dataclass
 class BedrockRuntimeData:
-    """Runtime data for the Bedrock conversation integration."""
+    """Runtime data for a config entry."""
 
     client: BedrockClient
 
@@ -37,160 +63,286 @@ class BedrockRuntimeData:
 type BedrockConfigEntry = ConfigEntry[BedrockRuntimeData]
 
 
-class HassServiceTool(llm.Tool):
-    """Tool for calling Home Assistant services."""
-
-    name = SERVICE_TOOL_NAME
-    description = (
-        "Calls a Home Assistant service to control a specific device. "
-        "You MUST provide the exact entity_id from the device list in the system prompt. "
-        "Use this tool after identifying the correct device from the user's natural language request. "
-        "For example: if user says 'turn on the lamp', find the entity_id containing 'lamp' from the device list, "
-        "then call this tool with service='light.turn_on' and target_device='light.lamp_entity_id'."
-    )
-
-    parameters = vol.Schema(
-        {
-            vol.Required("service"): str,
-            vol.Required("target_device"): str,
-        }
-    )
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        """Initialize the tool."""
-        self.hass = hass
-
-    async def async_call(
-        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
-    ) -> dict:
-        """Call the Home Assistant service."""
-        service = tool_input.tool_args.get("service")
-        target_device = tool_input.tool_args.get("target_device")
-
-        _LOGGER.debug("Tool call: service=%s, device=%s", service, target_device)
-
-        if not service or not target_device:
-            error_msg = "Missing required parameters: service and target_device"
-            _LOGGER.error("Service call failed: %s", error_msg)
-            return {"result": "error", "error": error_msg}
-
-        # Validate service format
-        try:
-            domain, service_name = service.split(".", 1)
-        except ValueError:
-            error_msg = f"Invalid service format: {service}. Expected 'domain.service'"
-            _LOGGER.error("Service call failed: %s", error_msg)
-            return {"result": "error", "error": error_msg}
-
-        # Check if domain is allowed
-        if domain not in SERVICE_TOOL_ALLOWED_DOMAINS:
-            error_msg = f"Service domain '{domain}' is not allowed"
-            _LOGGER.error("Service call failed: %s", error_msg)
-            return {"result": "error", "error": error_msg}
-
-        # Check if service is allowed
-        if service not in SERVICE_TOOL_ALLOWED_SERVICES:
-            error_msg = f"Service '{service}' is not allowed"
-            _LOGGER.error("Service call failed: %s", error_msg)
-            return {"result": "error", "error": error_msg}
-
-        # Build service data
-        service_data = {ATTR_ENTITY_ID: target_device}
-
-        # Add allowed additional arguments
-        for key, value in tool_input.tool_args.items():
-            if key in ALLOWED_SERVICE_CALL_ARGUMENTS:
-                service_data[key] = value
-
-        _LOGGER.debug("Calling service: %s.%s with data: %s", domain, service_name, service_data)
-
-        try:
-            async with asyncio.timeout(5.0):
-                await hass.services.async_call(
-                    domain,
-                    service_name,
-                    service_data,
-                    blocking=False,
-                )
-
-            _LOGGER.info("Successfully called %s on %s", service, target_device)
-            return {
-                "result": "success",
-                "service": service,
-                "target": target_device,
-                "message": f"Successfully called {service} on {target_device}",
-            }
-        except asyncio.TimeoutError:
-            error_msg = f"Timeout calling service {service} (took more than 5 seconds)"
-            _LOGGER.error("%s", error_msg)
-            return {"result": "error", "error": error_msg}
-        except Exception as err:
-            error_msg = f"Error calling service {service}: {err}"
-            _LOGGER.error("%s", error_msg, exc_info=True)
-            return {"result": "error", "error": error_msg}
-
-
-class BedrockServicesAPI(llm.API):
-    """Bedrock Services LLM API."""
-
-    def __init__(self, hass: HomeAssistant, id: str, name: str) -> None:
-        """Initialize the API."""
-        self.hass = hass
-        self.id = id
-        self.name = name
-
-    async def async_get_api_instance(
-        self, llm_context: llm.LLMContext
-    ) -> llm.APIInstance:
-        """Get API instance."""
-        tools = [HassServiceTool(self.hass)]
-
-        return llm.APIInstance(
-            api=self,
-            api_prompt=(
-                "You have access to the HassCallService tool to control Home Assistant devices. "
-                "CRITICAL: The device list in the system prompt contains all available devices with their entity_ids. "
-                "When the user asks to control a device, YOU MUST: "
-                "1. Search the device list for a matching entity based on the user's natural language (e.g., 'lamp', 'bedroom light') "
-                "2. Identify the correct entity_id from that list "
-                "3. Call HassCallService with the exact entity_id you found "
-                "NEVER ask the user for an entity_id - always find it yourself from the provided device list."
-            ),
-            llm_context=llm_context,
-            tools=tools,
-        )
-
-
-async def async_setup_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> None:
     """Set up AWS Bedrock Conversation from a config entry."""
-    _LOGGER.info("Starting Bedrock conversation integration setup")
+    # Before any entity is created: repair registries an unclean stop left
+    # behind after the v3 migration.
+    _repoint_legacy_registry_entries(hass, entry)
+    client = BedrockClient(hass, entry.data)
+    # Only the AWS error code is shown in the UI: the message can contain the
+    # account id and IAM principal. The full error is logged at debug level.
+    try:
+        await client.async_setup()
+        await client.async_validate()
+    except BedrockAuthError as err:
+        LOGGER.debug("Credential check failed: %s", err)
+        raise ConfigEntryAuthFailed(err.code) from err
+    except BedrockAccessDeniedError as err:
+        LOGGER.error("AWS denied listing Bedrock models: %s", err)
+        raise ConfigEntryError(err.code) from err
+    except BedrockError as err:
+        LOGGER.debug("Bedrock not reachable: %s", err)
+        raise ConfigEntryNotReady(err.code) from err
 
-    # Register the LLM API if not already registered
-    existing_apis = [api.id for api in llm.async_get_apis(hass)]
-    if HOME_LLM_API_ID not in existing_apis:
-        llm.async_register_api(hass, BedrockServicesAPI(hass, HOME_LLM_API_ID, "AWS Bedrock Services"))
-        _LOGGER.info("Registered Bedrock Services LLM API")
+    entry.runtime_data = BedrockRuntimeData(client=client)
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = entry
-
-    # Create the Bedrock client and store it as typed runtime_data
-    entry.runtime_data = BedrockRuntimeData(
-        client=BedrockClient(hass, entry),
-    )
+    if _API_UNREGISTER not in hass.data:
+        hass.data[_API_UNREGISTER] = llm.async_register_api(hass, BedrockServicesAPI(hass))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Adding, changing or removing an agent (sub-entry) reloads the entry.
+    entry.async_on_unload(entry.add_update_listener(_async_reload))
 
-    _LOGGER.info("Bedrock conversation integration setup complete")
-    return True
+
+async def _async_reload(hass: HomeAssistant, entry: BedrockConfigEntry) -> None:
+    """Reload the entry once for a batch of updates.
+
+    A flow step can update several sub-entries and the entry at once; each
+    update calls this listener. The first call waits one loop turn so the
+    others (started in the same step) find it pending and skip. Updates made
+    after the wait start a new reload, so none is lost.
+    """
+    pending = hass.data.setdefault(_RELOAD_PENDING, set())
+    if entry.entry_id in pending:
+        return
+    pending.add(entry.entry_id)
+    try:
+        await asyncio.sleep(0)
+    finally:
+        pending.discard(entry.entry_id)
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> None:
     """Unload a config entry."""
-    _LOGGER.info("Unloading Bedrock conversation integration")
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    await hass.config_entries.async_unload_platforms_or_raise(entry, PLATFORMS)
+    others_loaded = any(
+        other.entry_id != entry.entry_id
+        for other in hass.config_entries.async_loaded_entries(DOMAIN)
+    )
+    if not others_loaded and (unregister := hass.data.pop(_API_UNREGISTER, None)):
+        unregister()
 
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
 
-    return unload_ok
+# --- Migration ---------------------------------------------------------------
+
+# Options from 1.x that no longer exist: HA's chat log now handles memory and
+# the system prompt, and top_p/top_k were never sent to Claude models.
+_REMOVED_OPTIONS = (
+    "top_p",
+    "top_k",
+    "refresh_prompt_per_turn",
+    "refresh_system_prompt",
+    "remember_conversation",
+    "remember_num_interactions",
+    "selected_language",
+    "request_timeout",
+)
+_LEGACY_API_IDS = {"bedrock-service-api": HOME_LLM_API_ID}
+# 1.x expanded these placeholders itself. HA now adds the date and the
+# selected API adds the device list, so they are removed from the prompt.
+_LEGACY_PLACEHOLDERS = ("<current_date>", "<devices>")
+_LEGACY_PERSONA = "<persona>"
+_TEMPLATE_SYNTAX = re.compile(r"\{\{|\{%|\{#")
+_RAW_START, _RAW_END = "{% raw %}", "{% endraw %}"
+_LITERAL_TEMPLATE_PREFIX, _LITERAL_TEMPLATE_SUFFIX = "{{ ", " }}"
+
+
+def _literal_prompt_template(prompt: str) -> str:
+    """Return a template expression that renders ``prompt`` literally."""
+    return f"{_LITERAL_TEMPLATE_PREFIX}{json.dumps(prompt, ensure_ascii=False)}{_LITERAL_TEMPLATE_SUFFIX}"
+
+
+def _is_literal_prompt_template(prompt: str) -> bool:
+    """Return whether ``prompt`` is the canonical literal expression above."""
+    if not (
+        prompt.startswith(_LITERAL_TEMPLATE_PREFIX) and prompt.endswith(_LITERAL_TEMPLATE_SUFFIX)
+    ):
+        return False
+    try:
+        literal = json.loads(prompt[len(_LITERAL_TEMPLATE_PREFIX) : -len(_LITERAL_TEMPLATE_SUFFIX)])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(literal, str) and prompt == _literal_prompt_template(literal)
+
+
+def _sanitize_agent_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove LLM APIs that do not enforce per-entity exposure."""
+    sanitized = dict(options)
+    if CONF_LLM_HASS_API in sanitized:
+        sanitized[CONF_LLM_HASS_API] = exposure_bounded_llm_api_ids(sanitized[CONF_LLM_HASS_API])
+    return sanitized
+
+
+def migrate_v1_to_v2(
+    data: Mapping[str, Any], options: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return v2 data and options for a v1 entry.
+
+    Pure and idempotent. Unknown keys are kept; nothing the user chose is
+    replaced by a default.
+    """
+    data, options = dict(data), dict(options)
+
+    # Region: the options flow used to store it in options; it now lives in
+    # data next to the credentials it was validated with.
+    data[CONF_AWS_REGION] = (
+        options.pop(CONF_AWS_REGION, None) or data.get(CONF_AWS_REGION) or DEFAULT_AWS_REGION
+    )
+    # 1.x never read a session token from options, so one stored there is
+    # stale; copying it into data would pair it with permanent keys and AWS
+    # would reject the request. Discard it and keep data's own token.
+    options.pop(CONF_AWS_SESSION_TOKEN, None)
+
+    for key in _REMOVED_OPTIONS:
+        options.pop(key, None)
+
+    if CONF_LLM_HASS_API in options:
+        api = options[CONF_LLM_HASS_API]
+        apis = [api] if isinstance(api, str) else api if isinstance(api, (list, tuple)) else []
+        options[CONF_LLM_HASS_API] = exposure_bounded_llm_api_ids(
+            [_LEGACY_API_IDS.get(a, a) for a in apis if isinstance(a, str)]
+        )
+
+    # Number selectors stored floats; slices and API fields need ints.
+    for key in (CONF_MAX_TOKENS, CONF_MAX_TOOL_CALL_ITERATIONS):
+        if options.get(key) is not None:
+            options[key] = int(float(options[key]))
+    if options.get(CONF_TEMPERATURE) is not None:
+        options[CONF_TEMPERATURE] = float(options[CONF_TEMPERATURE])
+
+    if isinstance(prompt := options.get(CONF_PROMPT), str):
+        options[CONF_PROMPT] = _migrate_prompt(prompt)
+        if not options[CONF_PROMPT]:
+            options.pop(CONF_PROMPT)  # fall back to HA's default instructions
+
+    return data, options
+
+
+def _migrate_prompt(prompt: str) -> str:
+    """Remove 1.x placeholders and keep the text literal.
+
+    1.x sent the prompt as plain text; HA now renders it as a template. Text
+    with template syntax is wrapped in a raw block so it stays literal. Raw
+    block markers themselves need a quoted expression because they would
+    otherwise change or break the surrounding template.
+    """
+    for placeholder in (*_LEGACY_PLACEHOLDERS, _LEGACY_PERSONA):
+        prompt = prompt.replace(placeholder, "")
+    prompt = prompt.strip()
+    if _is_literal_prompt_template(prompt):
+        return prompt
+    if _RAW_START in prompt or _RAW_END in prompt:
+        # Keep the raw wrapper emitted by older migration runs idempotent.
+        if (
+            prompt.startswith(_RAW_START)
+            and prompt.endswith(_RAW_END)
+            and prompt.count(_RAW_START) == prompt.count(_RAW_END) == 1
+        ):
+            return prompt
+        return _literal_prompt_template(prompt)
+    if _TEMPLATE_SYNTAX.search(prompt):
+        prompt = f"{_RAW_START}{prompt}{_RAW_END}"
+    return prompt
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Migrate old config entries."""
+    if (entry.version, entry.minor_version) > (3, 1):
+        # Downgrade from a future version: refuse rather than corrupt it.
+        raise ConfigEntryError(
+            f"Entry version {entry.version}.{entry.minor_version} is newer than this release"
+        )
+    if entry.version == 1:
+        data, options = migrate_v1_to_v2(entry.data, entry.options)
+        # Keep a title the user chose; refresh the automatic one (its region
+        # was the setup region, not the one in use).
+        title = entry.title
+        if is_default_title(title):
+            title = default_title(data[CONF_AWS_REGION])
+        hass.config_entries.async_update_entry(
+            entry, data=data, options=options, title=title, version=2, minor_version=1
+        )
+        LOGGER.info("Migrated %s to version 2.1", entry.entry_id)
+    if entry.version == 2:
+        _migrate_v2_to_v3(hass, entry)
+        LOGGER.info("Migrated %s to version 3.1 (agent moved to a sub-entry)", entry.entry_id)
+
+
+def _migrate_v2_to_v3(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Move the agent settings from the entry options into a sub-entry.
+
+    The conversation entity and its device are re-pointed to the sub-entry and
+    keep their entity id, so voice assistants using the agent keep working.
+    Safe to re-run if interrupted: an existing sub-entry is reused, and an
+    entity already re-pointed no longer has the entry id as unique id, so it
+    is left alone. Setup repeats the re-point in case the registries were not
+    saved (see `_repoint_legacy_registry_entries`).
+    """
+    subentry = next(
+        (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_CONVERSATION),
+        None,
+    )
+    if subentry is None:
+        subentry = ConfigSubentry(
+            data=_sanitize_agent_options(entry.options),
+            subentry_type=SUBENTRY_CONVERSATION,
+            title=entry.title,
+            unique_id=None,
+        )
+        hass.config_entries.async_add_subentry(entry, subentry)
+    else:
+        sanitized = _sanitize_agent_options(subentry.data)
+        if sanitized != dict(subentry.data):
+            hass.config_entries.async_update_subentry(entry, subentry, data=sanitized)
+
+    _repoint_legacy_registry_entries(hass, entry)
+    hass.config_entries.async_update_entry(entry, options={}, version=3, minor_version=1)
+
+
+def _repoint_legacy_registry_entries(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Move the 1.x/2.x entity and device (keyed by entry id) to the agent sub-entry.
+
+    Called by the v2→v3 migration and again on every setup: HA saves config
+    entries within a second but the entity and device registries only after
+    minutes during startup, so an unclean stop can persist the v3 entry while
+    the registries still hold the old unique id. Without this, setup would
+    create a second entity and voice assistants would lose their agent.
+
+    No-op on a clean entry, when the entry has more than one agent (the target
+    is ambiguous), or when the sub-entry already has an entity/device.
+    """
+    agents = [s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_CONVERSATION]
+    if len(agents) != 1:
+        return
+    subentry_id = agents[0].subentry_id
+
+    entity_registry = er.async_get(hass)
+    if entity_registry.async_get_entity_id("conversation", DOMAIN, subentry_id) is None:
+        for entity in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+            if (
+                entity.domain == "conversation"
+                and entity.unique_id == entry.entry_id
+                and entity.config_subentry_id not in entry.subentries
+            ):
+                entity_registry.async_update_entity(
+                    entity.entity_id,
+                    new_unique_id=subentry_id,
+                    config_subentry_id=subentry_id,
+                )
+                break  # unique ids are unique: at most one legacy entity
+
+    device_registry = dr.async_get(hass)
+    if device_registry.async_get_device_by_identifier(
+        (DOMAIN, subentry_id), entry.entry_id
+    ) is None and (
+        device := device_registry.async_get_device_by_identifier(
+            (DOMAIN, entry.entry_id), entry.entry_id
+        )
+    ):
+        device_registry.async_update_device(
+            device.id,
+            new_identifiers={(DOMAIN, subentry_id)},
+            new_config_entry_id=entry.entry_id,
+            new_config_subentry_id=subentry_id,
+        )

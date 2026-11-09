@@ -1,0 +1,151 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "AWS Bedrock",
+        "description": "Elige la región de AWS e introduce las credenciales de un usuario IAM autorizado para consultar los metadatos de Amazon Bedrock. El siguiente paso muestra metadatos de modelos de texto activos con streaming y perfiles de inferencia del sistema para esa región. La lista no comprueba el acceso al modelo ni el permiso de invocación.",
+        "data": {
+          "aws_region": "Región de AWS",
+          "aws_access_key_id": "ID de clave de acceso",
+          "aws_secret_access_key": "Clave de acceso secreta",
+          "aws_session_token": "Token de sesión (solo credenciales temporales)"
+        },
+        "data_description": {
+          "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas."
+        }
+      },
+      "model": {
+        "title": "Elige un modelo",
+        "description": "Modelos y perfiles de inferencia detectados en {region}: {count}. Los que llevan prefijo geográfico (us., eu., apac., global.) son perfiles de inferencia, necesarios para los modelos más recientes. Bedrock comprueba el acceso al modelo y el permiso bedrock:InvokeModelWithResponseStream cuando el agente intenta usar el modelo o perfil elegido. El modelo debe admitir uso de herramientas para controlar dispositivos.",
+        "data": {
+          "model": "Modelo",
+          "llm_hass_api": "Control de dispositivos"
+        },
+        "data_description": {
+          "llm_hass_api": "\"Device control\" es la API Assist integrada en Home Assistant y es la recomendada. \"AWS Bedrock Services\" es la API propia de esta integración de la versión 1.x."
+        }
+      },
+      "reauth_confirm": {
+        "title": "AWS ha rechazado las credenciales",
+        "description": "AWS ha rechazado las credenciales guardadas para {region}. Introduce unas nuevas.",
+        "data": {
+          "aws_access_key_id": "ID de clave de acceso",
+          "aws_secret_access_key": "Clave de acceso secreta",
+          "aws_session_token": "Token de sesión (solo credenciales temporales)"
+        },
+        "data_description": {
+          "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas."
+        }
+      },
+      "reconfigure": {
+        "title": "Cambiar región o credenciales",
+        "data": {
+          "aws_region": "Región de AWS",
+          "aws_access_key_id": "ID de clave de acceso",
+          "aws_secret_access_key": "Clave de acceso secreta",
+          "aws_session_token": "Token de sesión (solo credenciales temporales)"
+        },
+        "description": "Cambia la región o las credenciales. Si cambias la región, el siguiente paso muestra metadatos de modelos y perfiles de inferencia de la nueva región; si no, cada agente conserva su modelo.",
+        "data_description": {
+          "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas."
+        }
+      },
+      "reconfigure_model": {
+        "title": "Elige un modelo",
+        "description": "Modelos y perfiles de inferencia detectados en {region}: {count}. El modelo elegido se aplica a todos los agentes de esta integración; después puedes cambiar cada uno.",
+        "data": {
+          "model": "Modelo"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "AWS ha rechazado estas credenciales. Revisa la clave de acceso, la clave secreta y el token de sesión.",
+      "access_denied": "AWS ha aceptado estas credenciales, pero no se han podido listar los metadatos de los modelos. Concede bedrock:ListFoundationModels y bedrock:ListInferenceProfiles. La invocación se comprueba después y requiere bedrock:InvokeModelWithResponseStream.",
+      "cannot_connect": "No se ha podido conectar con AWS. Revisa la conexión de red.",
+      "unknown": "Error inesperado. Revisa los registros.",
+      "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia."
+    },
+    "abort": {
+      "already_configured": "Estas credenciales ya están configuradas para esta región.",
+      "reauth_successful": "Credenciales actualizadas.",
+      "reconfigure_successful": "Configuración actualizada."
+    }
+  },
+  "exceptions": {
+    "timeout": {
+      "message": "AWS Bedrock ha tardado demasiado en responder."
+    },
+    "auth_error": {
+      "message": "AWS ha rechazado las credenciales. Actualízalas en los ajustes de la integración."
+    },
+    "access_denied": {
+      "message": "Se ha denegado el acceso a este modelo de Bedrock ({code}). Revisa el acceso al modelo y los permisos IAM."
+    },
+    "cannot_connect": {
+      "message": "No se ha podido conectar con AWS Bedrock."
+    },
+    "api_error": {
+      "message": "AWS Bedrock ha devuelto un error ({code})."
+    },
+    "response_blocked": {
+      "message": "Un filtro de contenido ha bloqueado la respuesta."
+    },
+    "context_window_exceeded": {
+      "message": "La conversación es demasiado larga para este modelo. Empieza una nueva."
+    },
+    "too_many_tool_calls": {
+      "message": "No he podido completar esa petición."
+    },
+    "too_many_tool_calls_in_response": {
+      "message": "El modelo ha enviado demasiadas peticiones de herramientas en una sola respuesta (máximo {maximum}). No se ha ejecutado ninguna."
+    },
+    "tool_args_error": {
+      "message": "El modelo ha enviado una petición de herramienta no válida."
+    },
+    "system_message_not_found": {
+      "message": "La conversación no tiene instrucciones de sistema."
+    },
+    "response_too_long": {
+      "message": "La respuesta se ha cortado por el límite de tokens. Usa Reconfigurar agente para aumentar \"Máximo de tokens por respuesta\"."
+    }
+  },
+  "config_subentries": {
+    "conversation": {
+      "entry_type": "Agente de conversación",
+      "initiate_flow": {
+        "user": "Añadir agente",
+        "reconfigure": "Reconfigurar agente"
+      },
+      "step": {
+        "set_options": {
+          "title": "Ajustes del agente",
+          "description": "Región: {region}. Modelos y perfiles de inferencia detectados: {count}. Usa Reconfigurar en la integración para cambiar la región o las credenciales.",
+          "data": {
+            "model": "Modelo",
+            "prompt": "Instrucciones",
+            "llm_hass_api": "Control de dispositivos",
+            "confirm_sensitive_actions": "Pedir confirmación hablada antes de abrir cerraduras, puertas, garajes o cancelas, ejecutar scripts y otras acciones sensibles",
+            "max_tokens": "Máximo de tokens por respuesta",
+            "temperature": "Temperatura",
+            "max_tool_call_iterations": "Máximo de rondas de herramientas por petición",
+            "prompt_caching": "Caché de instrucciones",
+            "name": "Nombre"
+          },
+          "data_description": {
+            "prompt": "Instrucciones para el asistente. Home Assistant añade la fecha actual y, con el control de dispositivos activado, los dispositivos expuestos. Admite plantillas.",
+            "llm_hass_api": "Elige una o las dos API limitadas por la lista de entidades expuestas. Ambas respetan Ajustes → Asistentes de voz → Exponer. La API administrativa de Home Assistant, sin estas restricciones, y las API de terceros no se ofrecen.",
+            "prompt_caching": "Reutiliza las instrucciones y la lista de herramientas entre peticiones, lo que reduce coste y latencia en los modelos que lo admiten. Se desactiva automáticamente en los modelos que no lo admiten.",
+            "confirm_sensitive_actions": "El asistente hace una pregunta fija que nombra la acción; solo un sí claro de la misma persona y dispositivo la ejecuta."
+          }
+        }
+      },
+      "error": {
+        "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia."
+      },
+      "abort": {
+        "entry_not_loaded": "La integración no está cargada. Revisa primero las credenciales.",
+        "reconfigure_successful": "Agente actualizado."
+      }
+    }
+  }
+}

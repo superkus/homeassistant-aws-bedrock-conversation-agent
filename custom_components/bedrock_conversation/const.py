@@ -1,51 +1,82 @@
-"""Constants for the AWS Bedrock Conversation integration.
+"""Constants for the AWS Bedrock Conversation integration."""
 
-Defines configuration keys, default values, allowed services/domains,
-available model IDs, and system prompt templates.
-"""
+from __future__ import annotations
+
+import logging
+import re
 from typing import Final
 
-DOMAIN: Final = "bedrock_conversation"
-HOME_LLM_API_ID: Final = f"{DOMAIN}_services"
+from homeassistant.const import (
+    CONF_LLM_HASS_API as CONF_LLM_HASS_API,  # re-exported
+    CONF_MODEL,
+    CONF_PROMPT as CONF_PROMPT,  # re-exported
+)
+from homeassistant.helpers import llm
 
-# AWS Configuration
+DOMAIN: Final = "bedrock_conversation"
+LOGGER = logging.getLogger(__package__)
+
+# ID of the LLM API this integration registers (kept stable for existing users).
+HOME_LLM_API_ID: Final = f"{DOMAIN}_services"
+# These APIs enforce Settings -> Voice assistants -> Expose for every entity.
+EXPOSURE_BOUNDED_LLM_API_IDS: Final = frozenset({llm.LLM_API_ASSIST, HOME_LLM_API_ID})
+
+
+def exposure_bounded_llm_api_ids(configured: object) -> list[str]:
+    """Return configured API IDs that enforce per-entity exposure."""
+    if isinstance(configured, str):
+        configured = [configured]
+    if not isinstance(configured, (list, tuple)):
+        return []
+    return [
+        api_id
+        for api_id in configured
+        if isinstance(api_id, str) and api_id in EXPOSURE_BOUNDED_LLM_API_IDS
+    ]
+
+
+# Config entry data (credentials + region)
 CONF_AWS_ACCESS_KEY_ID: Final = "aws_access_key_id"
 CONF_AWS_SECRET_ACCESS_KEY: Final = "aws_secret_access_key"
 CONF_AWS_SESSION_TOKEN: Final = "aws_session_token"
-CONF_AWS_DEFAULT_REGION: Final = "aws_default_region"
 CONF_AWS_REGION: Final = "aws_region"
 
-# Agent configuration
-CONF_MODEL_ID: Final = "model"
-CONF_PROMPT: Final = "prompt"
-CONF_TEMPERATURE: Final = "temperature"
-CONF_TOP_P: Final = "top_p"
-CONF_TOP_K: Final = "top_k"
+# Config sub-entry data (per-agent settings). CONF_PROMPT and
+# CONF_LLM_HASS_API come from homeassistant.const, like in HA's own LLM
+# integrations.
+CONF_MODEL_ID: Final = CONF_MODEL
 CONF_MAX_TOKENS: Final = "max_tokens"
-CONF_REFRESH_SYSTEM_PROMPT: Final = "refresh_prompt_per_turn"
-CONF_REMEMBER_CONVERSATION: Final = "remember_conversation"
-CONF_REMEMBER_NUM_INTERACTIONS: Final = "remember_num_interactions"
+CONF_TEMPERATURE: Final = "temperature"
 CONF_MAX_TOOL_CALL_ITERATIONS: Final = "max_tool_call_iterations"
+CONF_PROMPT_CACHING: Final = "prompt_caching"
+CONF_CONFIRM_SENSITIVE_ACTIONS: Final = "confirm_sensitive_actions"
 CONF_EXTRA_ATTRIBUTES_TO_EXPOSE: Final = "extra_attributes_to_expose"
-CONF_LLM_HASS_API: Final = "llm_hass_api"
-CONF_SELECTED_LANGUAGE: Final = "selected_language"
 
-DEFAULT_MODEL_ID: Final = "anthropic.claude-3-haiku-20240307-v1:0"
-DEFAULT_PROMPT: Final = """<persona>
+DEFAULT_AWS_REGION: Final = "us-east-1"
+# Each agent is a sub-entry of this type under the credentials entry.
+SUBENTRY_CONVERSATION: Final = "conversation"
+DEFAULT_AGENT_NAME: Final = "AWS Bedrock"
+_DEFAULT_TITLE_RE = re.compile(r"AWS Bedrock \([a-z0-9-]+\)")
 
-<current_date>
 
-<devices>"""
-DEFAULT_MAX_TOKENS: Final = 4096
-DEFAULT_TEMPERATURE: Final = 1.0
-DEFAULT_TOP_P: Final = 0.999
-DEFAULT_TOP_K: Final = 250
-DEFAULT_AWS_REGION: Final = "us-west-2"
-DEFAULT_REFRESH_SYSTEM_PROMPT: Final = True
-DEFAULT_REMEMBER_CONVERSATION: Final = True
-DEFAULT_REMEMBER_NUM_INTERACTIONS: Final = 10
-DEFAULT_MAX_TOOL_CALL_ITERATIONS: Final = 5
-DEFAULT_SELECTED_LANGUAGE: Final = "en"
+def default_title(region: str) -> str:
+    """Return the automatic title of an entry for ``region``."""
+    return f"AWS Bedrock ({region})"
+
+
+def is_default_title(title: str | None) -> bool:
+    """Return True if ``title`` is an automatic title (not chosen by the user)."""
+    return bool(title) and _DEFAULT_TITLE_RE.fullmatch(title) is not None
+
+
+DEFAULT_PROMPT: Final = llm.DEFAULT_INSTRUCTIONS_PROMPT
+DEFAULT_LLM_HASS_API: Final = [llm.LLM_API_ASSIST]
+# Spoken answers are short; a low ceiling also bounds cost if the model rambles.
+DEFAULT_MAX_TOKENS: Final = 1024
+DEFAULT_TEMPERATURE: Final = 0.5
+DEFAULT_MAX_TOOL_CALL_ITERATIONS: Final = 10
+DEFAULT_PROMPT_CACHING: Final = True
+DEFAULT_CONFIRM_SENSITIVE_ACTIONS: Final = True
 DEFAULT_EXTRA_ATTRIBUTES: Final = [
     "brightness",
     "rgb_color",
@@ -57,171 +88,117 @@ DEFAULT_EXTRA_ATTRIBUTES: Final = [
     "hvac_mode",
     "hvac_action",
     "preset_mode",
-    "media_title",
-    "media_artist",
+    "current_position",
     "volume_level",
 ]
 
-# Service tool configuration
+# Timeouts in seconds. With streaming, the read timeout applies between chunks,
+# so it bounds a stalled connection rather than the length of the answer.
+BEDROCK_CONNECT_TIMEOUT: Final = 5
+BEDROCK_READ_TIMEOUT: Final = 15
+BEDROCK_MAX_ATTEMPTS: Final = 2
+# Upper bound for one whole conversation turn, including time waiting for a
+# Bedrock stream slot and all tool iterations.
+TURN_TIMEOUT: Final = 60
+SERVICE_CALL_TIMEOUT: Final = 10
+# One credentials client shares Home Assistant's executor across all its agents.
+BEDROCK_MAX_CONCURRENT_STREAMS: Final = 2
+# Bound events buffered between botocore's worker thread and the event loop.
+BEDROCK_STREAM_QUEUE_MAXSIZE: Final = 16
+# Home Assistant creates one task per tool call in a model response.
+MAX_TOOL_CALLS_PER_RESPONSE: Final = 10
+# Pending confirmations expire so a stale "yes" cannot trigger an old request.
+CONFIRMATION_TIMEOUT: Final = 120
+
+# Bedrock tool names must match ^[a-zA-Z0-9_-]{1,64}$
+BEDROCK_TOOL_NAME_MAX_LEN: Final = 64
+
+# --- Custom "AWS Bedrock Services" LLM API -----------------------------------
+
 SERVICE_TOOL_NAME: Final = "HassCallService"
-SERVICE_TOOL_ALLOWED_DOMAINS: Final = [
-    "light",
-    "switch",
-    "fan",
-    "climate",
-    "cover",
-    "media_player",
-    "lock",
-    "script",
-    "scene",
-    "input_boolean",
-    "input_number",
-    "input_text",
-    "input_select",
-    "input_datetime",
-    "timer",
-]
-SERVICE_TOOL_ALLOWED_SERVICES: Final = [
-    "light.turn_on",
-    "light.turn_off",
-    "light.toggle",
-    "switch.turn_on",
-    "switch.turn_off",
-    "switch.toggle",
-    "fan.turn_on",
-    "fan.turn_off",
-    "fan.set_percentage",
-    "fan.oscillate",
-    "fan.set_direction",
-    "fan.set_preset_mode",
-    "climate.set_temperature",
-    "climate.set_humidity",
-    "climate.set_fan_mode",
-    "climate.set_hvac_mode",
-    "climate.set_preset_mode",
-    "cover.open_cover",
-    "cover.close_cover",
-    "cover.stop_cover",
-    "cover.set_cover_position",
-    "media_player.turn_on",
-    "media_player.turn_off",
-    "media_player.toggle",
-    "media_player.volume_up",
-    "media_player.volume_down",
-    "media_player.volume_set",
-    "media_player.volume_mute",
-    "media_player.media_play",
-    "media_player.media_pause",
-    "media_player.media_stop",
-    "media_player.media_next_track",
-    "media_player.media_previous_track",
-    "media_player.play_media",
-    "lock.lock",
-    "lock.unlock",
-    "script.turn_on",
-    "scene.turn_on",
-    "input_boolean.turn_on",
-    "input_boolean.turn_off",
-    "input_boolean.toggle",
-    "input_number.set_value",
-    "input_text.set_value",
-    "input_select.select_option",
-    "input_datetime.set_datetime",
-    "timer.start",
-    "timer.pause",
-    "timer.cancel",
-    "timer.finish",
-]
+STATE_TOOL_NAME: Final = "HassGetState"
 
-ALLOWED_SERVICE_CALL_ARGUMENTS: Final = [
-    "brightness",
-    "brightness_pct",
-    "rgb_color",
-    "temperature",
-    "humidity",
-    "fan_mode",
-    "hvac_mode",
-    "preset_mode",
-    "item",
-    "duration",
-    "percentage",
-    "oscillating",
-    "direction",
-    "target_temp_high",
-    "target_temp_low",
-    "position",
-    "tilt_position",
-    "volume_level",
-    "is_volume_muted",
-    "media_content_id",
-    "media_content_type",
-    "value",
-    "option",
-    "datetime",
-]
+# Services the custom tool may call. Anything else is rejected.
+SERVICE_TOOL_ALLOWED_SERVICES: Final = frozenset(
+    {
+        "light.turn_on",
+        "light.turn_off",
+        "light.toggle",
+        "switch.turn_on",
+        "switch.turn_off",
+        "switch.toggle",
+        "fan.turn_on",
+        "fan.turn_off",
+        "fan.set_percentage",
+        "fan.oscillate",
+        "fan.set_direction",
+        "fan.set_preset_mode",
+        "climate.set_temperature",
+        "climate.set_humidity",
+        "climate.set_fan_mode",
+        "climate.set_hvac_mode",
+        "climate.set_preset_mode",
+        "cover.open_cover",
+        "cover.close_cover",
+        "cover.stop_cover",
+        "cover.set_cover_position",
+        "media_player.turn_on",
+        "media_player.turn_off",
+        "media_player.toggle",
+        "media_player.volume_up",
+        "media_player.volume_down",
+        "media_player.volume_set",
+        "media_player.volume_mute",
+        "media_player.media_play",
+        "media_player.media_pause",
+        "media_player.media_stop",
+        "media_player.media_next_track",
+        "media_player.media_previous_track",
+        "lock.lock",
+        "lock.unlock",
+        "script.turn_on",
+        "scene.turn_on",
+        "input_boolean.turn_on",
+        "input_boolean.turn_off",
+        "input_boolean.toggle",
+        "input_number.set_value",
+        "input_select.select_option",
+        "timer.start",
+        "timer.pause",
+        "timer.cancel",
+        "timer.finish",
+    }
+)
 
-AVAILABLE_MODELS: Final = [
-    # Claude 3.x family - using inference profiles for newer models
-    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",  # Inference profile for v2 (requires inference profile)
-    "anthropic.claude-3-5-sonnet-20240620-v1:0",     # Direct model ID (stable)
-    "us.anthropic.claude-3-5-haiku-20241022-v1:0",   # Inference profile for newer haiku
-    "anthropic.claude-3-haiku-20240307-v1:0",        # Direct model ID (stable, recommended)
-    "anthropic.claude-3-opus-20240229-v1:0",         # Direct model ID (stable)
-    "anthropic.claude-3-sonnet-20240229-v1:0",       # Direct model ID (stable)
-    # Amazon Nova family (AWS native models)
-    "amazon.nova-pro-v1:0",
-    "amazon.nova-lite-v1:0",
-    "amazon.nova-micro-v1:0",
-    # Meta Llama family
-    "meta.llama3-2-90b-instruct-v1:0",
-    "meta.llama3-2-11b-instruct-v1:0",
-    "meta.llama3-2-3b-instruct-v1:0",
-    "meta.llama3-2-1b-instruct-v1:0",
-    "meta.llama3-1-405b-instruct-v1:0",
-    "meta.llama3-1-70b-instruct-v1:0",
-    "meta.llama3-1-8b-instruct-v1:0",
-    # Mistral family
-    "mistral.mistral-large-2407-v1:0",
-    "mistral.mistral-small-2402-v1:0",
-]
+# --- Sensitive actions needing spoken confirmation ----------------------------
 
-# Models that support the Anthropic Messages API format (used by invoke_model)
-ANTHROPIC_MODELS_PREFIX: Final = "anthropic.claude"
-
-RECOMMENDED_MODELS: Final = [
-    "anthropic.claude-3-haiku-20240307-v1:0",        # Stable, fast, cost-effective
-    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",  # Latest Sonnet (requires inference profile)
-    "amazon.nova-lite-v1:0",                         # AWS native, reliable
-    "amazon.nova-pro-v1:0",                          # AWS native, more capable
-]
-
-# Default prompts
-PERSONA_PROMPTS = {
-    "en": """You are a helpful Home Assistant smart home assistant. Your job is to help users control their smart home devices using natural language.
-
-IMPORTANT INSTRUCTIONS FOR DEVICE CONTROL:
-1. When a user asks to control a device (e.g., "turn on the lamp", "dim the bedroom light"), you MUST identify the correct entity_id from the device list below
-2. NEVER ask the user for an entity_id - always find it yourself from the available devices
-3. Match user's natural language to device names using fuzzy matching:
-   - "lamp" matches devices with "lamp" in the name or entity_id
-   - "bedroom light" matches lights in the bedroom area or with "bedroom" in the name
-   - "living room fan" matches fans in the living room area
-4. If multiple devices match, choose the most likely one or ask the user to clarify which specific device they mean
-5. After identifying the device, use the HassCallService tool with the correct entity_id and service
-6. If you cannot find a matching device, explain what devices are available and ask the user to be more specific
-
-Examples:
-- User: "turn on the lamp" → Find entity_id containing "lamp" → Call light.turn_on with that entity_id
-- User: "set bedroom temperature to 72" → Find climate entity in bedroom → Call climate.set_temperature
-- User: "dim the kitchen lights to 50%" → Find light entity in kitchen → Call light.turn_on with brightness parameter""",
-}
-
-# Current date prompt
-CURRENT_DATE_PROMPT = {
-    "en": "The current date is <current_date>.",
-}
-
-# Template for devices prompt
-DEVICES_PROMPT = {
-    "en": """{% if devices %}The user has the following devices:\n\n{% for device in devices %}{% if device.area_name %}[{{ device.area_name }}] {% endif %}{{ device.name }} ({{ device.entity_id }}): {{ device.state }}{% if device.attributes %} ({% for attr in device.attributes %}{{ attr }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}\n{% endfor %}{% else %}The user has no exposed devices.{% endif %}""",
-}
+# Cover device classes whose opening gives physical access to the home.
+SENSITIVE_COVER_DEVICE_CLASSES: Final = frozenset({"door", "garage", "gate"})
+# A confirmation must start with one of these phrases (matched after
+# lower-casing and removing accents and punctuation). Weak fillers ("ok",
+# "claro") are left out on purpose: speech recognition produces them by accident.
+# fmt: off
+AFFIRMATIVE_PHRASES: Final = frozenset({
+    # Spanish
+    "si", "vale", "confirmo", "confirmado", "adelante", "hazlo", "de acuerdo",
+    "correcto", "afirmativo", "por supuesto",
+    # English
+    "yes", "yeah", "yep", "confirm", "confirmed", "do it", "go ahead", "affirmative",
+    # French, German, Portuguese
+    "oui", "ja", "sim",
+})
+# Words allowed after the yes phrase ("si, por favor", "yes, go ahead").
+# Anything else (a correction, a condition) means the answer is not a plain yes.
+AFFIRMATIVE_FOLLOW_WORDS: Final = frozenset({
+    "por", "favor", "hazlo", "adelante", "vale", "claro", "gracias", "confirmo",
+    "abrela", "abrelo", "abre", "abrir", "desbloquea", "desbloquealo", "desbloqueala",
+    "ejecuta", "ejecutalo", "activa", "activala", "activalo",
+    "please", "go", "ahead", "do", "it", "thanks", "bitte", "merci",
+})
+# Weak fillers that may come before the yes phrase ("okay, yes"). On their own
+# they are not a yes.
+AFFIRMATIVE_FILLERS: Final = frozenset({"ok", "okay"})
+# Single-word yes phrases that may not be repeated after the yes phrase:
+# "ja ja ja" is laughter, not a German yes.
+AFFIRMATIVE_NOT_REPEATABLE: Final = frozenset({"ja"})
+# fmt: on

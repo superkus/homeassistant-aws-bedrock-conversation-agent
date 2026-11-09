@@ -2,52 +2,149 @@
   "config": {
     "step": {
       "user": {
-        "title": "AWS Bedrock Configuration",
-        "description": "Configure your AWS Bedrock connection",
+        "title": "AWS Bedrock",
+        "description": "Choose the AWS region and enter credentials of an IAM user allowed to query Amazon Bedrock metadata there. The next step lists active streaming text model and system inference-profile metadata for that region. Listing does not verify model access or invocation permission.",
         "data": {
-          "aws_region": "AWS Region",
-          "aws_access_key_id": "AWS Access Key ID",
-          "aws_secret_access_key": "AWS Secret Access Key",
-          "aws_session_token": "AWS Session Token (optional)"
+          "aws_region": "AWS region",
+          "aws_access_key_id": "Access key ID",
+          "aws_secret_access_key": "Secret access key",
+          "aws_session_token": "Session token (temporary credentials only)"
+        },
+        "data_description": {
+          "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones."
+        }
+      },
+      "model": {
+        "title": "Choose a model",
+        "description": "Discovered models and inference profiles in {region}: {count}. Entries with a geographic prefix (us., eu., apac., global.) are inference profiles, which newer models require. Bedrock checks model access and bedrock:InvokeModelWithResponseStream permission when the agent invokes the selected model or profile. The model must support tool use for device control.",
+        "data": {
+          "model": "Model",
+          "llm_hass_api": "Device control"
+        },
+        "data_description": {
+          "llm_hass_api": "\"Device control\" is Home Assistant's built-in Assist API and is recommended. \"AWS Bedrock Services\" is this integration's own API from version 1.x."
+        }
+      },
+      "reauth_confirm": {
+        "title": "AWS credentials rejected",
+        "description": "AWS rejected the stored credentials for {region}. Enter new ones.",
+        "data": {
+          "aws_access_key_id": "Access key ID",
+          "aws_secret_access_key": "Secret access key",
+          "aws_session_token": "Session token (temporary credentials only)"
+        },
+        "data_description": {
+          "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones."
+        }
+      },
+      "reconfigure": {
+        "title": "Change region or credentials",
+        "data": {
+          "aws_region": "AWS region",
+          "aws_access_key_id": "Access key ID",
+          "aws_secret_access_key": "Secret access key",
+          "aws_session_token": "Session token (temporary credentials only)"
+        },
+        "description": "Change the region or credentials. If the region changes, the next step lists model and inference-profile metadata for the new region; otherwise each agent keeps its model.",
+        "data_description": {
+          "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones."
+        }
+      },
+      "reconfigure_model": {
+        "title": "Choose a model",
+        "description": "Discovered models and inference profiles in {region}: {count}. The selected model is set for every agent of this integration; each agent can be changed afterwards.",
+        "data": {
+          "model": "Model"
         }
       }
     },
     "error": {
-      "invalid_credentials": "Invalid AWS credentials",
-      "access_denied": "Access denied. Check your IAM permissions",
-      "cannot_connect": "Cannot connect to AWS Bedrock",
-      "unknown_error": "Unknown error occurred"
+      "invalid_auth": "AWS rejected these credentials. Check the access key, secret and session token.",
+      "access_denied": "AWS accepted these credentials, but model metadata could not be listed. Grant bedrock:ListFoundationModels and bedrock:ListInferenceProfiles. Model invocation is checked later and requires bedrock:InvokeModelWithResponseStream.",
+      "cannot_connect": "Could not reach AWS. Check the network connection.",
+      "unknown": "Unexpected error, see the logs.",
+      "no_models": "No models could be listed for this region. You can still type a model or inference profile ID."
     },
     "abort": {
-      "already_configured": "AWS Bedrock is already configured"
+      "already_configured": "These credentials are already set up for this region.",
+      "reauth_successful": "Credentials updated.",
+      "reconfigure_successful": "Configuration updated."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "AWS Region",
-        "description": "Select the AWS region. Models will be fetched for this region in the next step.",
-        "data": {
-          "aws_region": "AWS Region"
+  "exceptions": {
+    "timeout": {
+      "message": "AWS Bedrock took too long to answer."
+    },
+    "auth_error": {
+      "message": "AWS rejected the credentials. Update them in the integration settings."
+    },
+    "access_denied": {
+      "message": "Access to this Bedrock model was denied ({code}). Check model access and IAM permissions."
+    },
+    "cannot_connect": {
+      "message": "Could not reach AWS Bedrock."
+    },
+    "api_error": {
+      "message": "AWS Bedrock returned an error ({code})."
+    },
+    "response_blocked": {
+      "message": "The answer was blocked by a content filter."
+    },
+    "context_window_exceeded": {
+      "message": "The conversation is too long for this model. Start a new conversation."
+    },
+    "too_many_tool_calls": {
+      "message": "I could not complete that request."
+    },
+    "too_many_tool_calls_in_response": {
+      "message": "The model sent too many tool requests in one response (maximum {maximum}). No tools were run."
+    },
+    "tool_args_error": {
+      "message": "The model sent an invalid tool request."
+    },
+    "system_message_not_found": {
+      "message": "The conversation has no system prompt."
+    },
+    "response_too_long": {
+      "message": "The answer was cut off by the token limit. Use Reconfigure agent to increase \"Maximum tokens in a response\"."
+    }
+  },
+  "config_subentries": {
+    "conversation": {
+      "entry_type": "Conversation agent",
+      "initiate_flow": {
+        "user": "Add agent",
+        "reconfigure": "Reconfigure agent"
+      },
+      "step": {
+        "set_options": {
+          "title": "Agent settings",
+          "description": "Region: {region}. Models and inference profiles discovered: {count}. Use Reconfigure on the integration to change the region or credentials.",
+          "data": {
+            "model": "Model",
+            "prompt": "Instructions",
+            "llm_hass_api": "Device control",
+            "confirm_sensitive_actions": "Ask for spoken confirmation before unlocking, opening doors, garages or gates, running scripts and other sensitive actions",
+            "max_tokens": "Maximum tokens in a response",
+            "temperature": "Temperature",
+            "max_tool_call_iterations": "Maximum tool rounds per request",
+            "prompt_caching": "Prompt caching",
+            "name": "Name"
+          },
+          "data_description": {
+            "prompt": "Instructions for the assistant. Home Assistant adds the current date and, with device control enabled, the exposed devices. Templates are supported.",
+            "llm_hass_api": "Choose one or both exposure-bounded APIs. Both respect Settings → Voice assistants → Expose. The unrestricted admin Home Assistant API and arbitrary third-party APIs are deliberately not offered.",
+            "prompt_caching": "Reuses the instructions and tool list between requests, which lowers cost and latency on models that support it. Turned off automatically for models that do not.",
+            "confirm_sensitive_actions": "The assistant asks a fixed question naming the action; only a clear yes from the same person and device runs it."
+          }
         }
       },
-      "options": {
-        "title": "AWS Bedrock Options",
-        "description": "Models loaded for region: {region}",
-        "data": {
-          "model": "Bedrock Model",
-          "selected_language": "Language",
-          "prompt": "System Prompt Template",
-          "max_tokens": "Max Tokens",
-          "temperature": "Temperature",
-          "top_p": "Top P",
-          "top_k": "Top K",
-          "refresh_prompt_per_turn": "Refresh prompt each turn",
-          "remember_conversation": "Remember conversation",
-          "remember_num_interactions": "Number of interactions to remember",
-          "max_tool_call_iterations": "Max tool call iterations",
-          "llm_hass_api": "Home Assistant LLM API"
-        }
+      "error": {
+        "no_models": "No models could be listed for this region. You can still type a model or inference profile ID."
+      },
+      "abort": {
+        "entry_not_loaded": "The integration is not loaded. Check the credentials first.",
+        "reconfigure_successful": "Agent updated."
       }
     }
   }
