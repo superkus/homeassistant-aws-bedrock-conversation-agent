@@ -1,4 +1,5 @@
 """Test the utils module."""
+
 from custom_components.bedrock_conversation.utils import closest_color
 
 

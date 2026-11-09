@@ -1,7 +1,11 @@
 {
   "domain": "bedrock_conversation",
   "name": "AWS Bedrock Conversation",
-  "version": "1.0.37",
+  "after_dependencies": [
+    "assist_pipeline",
+    "intent",
+    "llm"
+  ],
   "codeowners": [
     "@superkus"
   ],
@@ -9,15 +13,17 @@
   "dependencies": [
     "conversation"
   ],
-  "after_dependencies": [
-    "assist_pipeline",
-    "intent"
-  ],
   "documentation": "https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent/issues",
+  "loggers": [
+    "boto3",
+    "botocore",
+    "s3transfer"
+  ],
   "requirements": [
-    "boto3>=1.35.0",
-    "webcolors>=24.8.0"
-  ]
+    "boto3>=1.40.0"
+  ],
+  "version": "2.0.0"
 }

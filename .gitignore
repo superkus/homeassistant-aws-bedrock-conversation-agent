@@ -44,3 +44,10 @@ htmlcov/
 
 # Local config (for testing)
 options.json
+
+# Local agent metadata
+.goose/
+.goosehints
+
+# Created by the Home Assistant test harness (contains generated auth data)
+tests/testing_config/

@@ -1,57 +1,36 @@
+.PHONY: venv deps test lint format clean version release
 
-.PHONY: test venv deps clean lint format release version typecheck release-no-tests
+PYTHON ?= python3.14
 
 venv:
-	python3 -m venv .venv
+	$(PYTHON) -m venv .venv
 
 deps: venv
-	.venv/bin/pip install -r requirements-test.txt
-	.venv/bin/pip install -e .
+	.venv/bin/pip install -r requirements-dev.txt
 
 test: deps
-	.venv/bin/pytest tests/ --cov=custom_components.bedrock_conversation --cov-report=term-missing --cov-report=html
-
-test-simple: deps
-	.venv/bin/pytest tests/test_bedrock_client.py tests/test_config_flow.py tests/test_init.py tests/test_utils.py -v
-
-clean:
-	rm -rf .venv
-	rm -rf __pycache__
-	rm -rf custom_components/bedrock_conversation/__pycache__
-	rm -rf htmlcov
-	rm -f .coverage
+	.venv/bin/pytest tests/ --cov=custom_components.bedrock_conversation --cov-report=term-missing
 
 lint: deps
-	.venv/bin/ruff check .
+	.venv/bin/ruff check custom_components tests
+	.venv/bin/ruff format --check custom_components tests
 
 format: deps
-	.venv/bin/black .
-	.venv/bin/isort .
+	.venv/bin/ruff check --fix custom_components tests
+	.venv/bin/ruff format custom_components tests
 
-typecheck: deps
-	.venv/bin/mypy custom_components/
+clean:
+	rm -rf .venv htmlcov .coverage
+	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
 version:
-	@python3 -c "import json; print(f'Version: {json.load(open(\"custom_components/bedrock_conversation/manifest.json\"))["version"]}')"
-	@echo "Tag would be: v$(shell python3 -c "import json; print(json.load(open('custom_components/bedrock_conversation/manifest.json'))['version'])")"
+	@python3 -c "import json; print(json.load(open('custom_components/bedrock_conversation/manifest.json'))['version'])"
 
-release: test-simple
+# Tags the manifest version and creates a GitHub release (needs a clean tree).
+release: test lint
 	@VERSION=$$(python3 -c "import json; print(json.load(open('custom_components/bedrock_conversation/manifest.json'))['version'])") && \
-	if git diff-index --quiet HEAD --; then \
-		if git tag | grep -q "v$$VERSION"; then \
-			echo "Error: Tag v$$VERSION already exists"; \
-			exit 1; \
-		else \
-			echo "Creating tag v$$VERSION" && \
-			git tag -a "v$$VERSION" -m "Release v$$VERSION" && \
-			git push origin "v$$VERSION" && \
-			echo "Creating GitHub release for v$$VERSION" && \
-			gh release create "v$$VERSION" --title "Release v$$VERSION" --notes "Automated release of version $$VERSION"; \
-		fi \
-	else \
-		echo "Error: Working tree has uncommitted changes"; \
-		exit 1; \
-	fi
-
-release-no-tests:
-	./release_no_tests.sh
+	if ! git diff-index --quiet HEAD -- || [ -n "$$(git ls-files --others --exclude-standard)" ]; then echo "Error: uncommitted changes"; exit 1; fi && \
+	if git tag | grep -qx "v$$VERSION"; then echo "Error: tag v$$VERSION exists"; exit 1; fi && \
+	git tag -a "v$$VERSION" -m "Release v$$VERSION" && \
+	git push origin "v$$VERSION" && \
+	gh release create "v$$VERSION" --title "v$$VERSION" --notes-file CHANGELOG.md
