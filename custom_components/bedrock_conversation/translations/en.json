@@ -107,6 +107,12 @@
     },
     "response_too_long": {
       "message": "The answer was cut off by the token limit. Use Reconfigure agent to increase \"Maximum tokens in a response\"."
+    },
+    "too_many_tool_operations_in_response": {
+      "message": "The model requested too many distinct tool operations in one response (maximum {maximum}). No tools were run."
+    },
+    "tool_api_missing": {
+      "message": "Tool execution is unavailable for this conversation."
     }
   },
   "config_subentries": {

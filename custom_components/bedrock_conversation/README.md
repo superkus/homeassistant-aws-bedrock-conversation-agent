@@ -44,12 +44,12 @@ Use **Reconfigure** to change the region or credentials; after a region change, 
 | Maximum tokens | 1024 |
 | Temperature | 0.5 |
 | Maximum tool rounds per request | 10 |
-| Tool calls accepted in one model response | 10 (fixed safety limit; excess calls are rejected before any run) |
+| Tool calls accepted in one model response | Up to 128 raw calls; homogeneous `HassCallService` calls are collapsed, then at most 10 distinct operations are allowed. Exceeding either limit rejects the response before any tool runs. |
 | Prompt caching (turned off automatically if the model does not support it) | On |
 
 ## "AWS Bedrock Services" API
 
-The 1.x API, kept for existing users. It adds the exposed devices to the prompt (a snapshot taken for the conversation), offers a read-only `HassGetState` tool for the current state of one exposed entity, and a `HassCallService` tool that calls one exposed entity at a time and only these services:
+The 1.x API, kept for existing users. It adds the exposed devices to the prompt (a snapshot taken for the conversation), offers a read-only `HassGetState` tool for the current state of one exposed entity, and a `HassCallService` tool. Use `target_device` for one entity or `target_devices` for up to 100 exposed entities receiving the same service and settings. If a model emits one call per entity, homogeneous calls are automatically collapsed into one Home Assistant service operation. The tool allows these services:
 
 - **light**: turn_on, turn_off, toggle
 - **switch**, **input_boolean**: turn_on, turn_off, toggle

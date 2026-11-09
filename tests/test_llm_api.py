@@ -137,3 +137,68 @@ async def test_device_data_cannot_be_closed_by_values(hass: HomeAssistant) -> No
     prompt = (await BedrockServicesAPI(hass).async_get_api_instance(_context())).api_prompt
     assert prompt.count("</device_data>") == 1
     assert prompt.rstrip().endswith("</device_data>")
+
+
+@pytest.mark.usefixtures("setup")
+async def test_bulk_service_call_is_atomic_and_deduplicated(hass: HomeAssistant) -> None:
+    """Many exposed targets become one HA service call; duplicates run once."""
+    targets = [f"cover.shade_{index}" for index in range(75)]
+    for entity_id in targets:
+        hass.states.async_set(entity_id, "open", {"device_class": "shade"})
+        async_expose_entity(hass, "conversation", entity_id, True)
+    calls = async_mock_service(hass, "cover", "close_cover")
+
+    result = await _call(
+        hass,
+        service="cover.close_cover",
+        target_devices=[*targets, targets[0]],
+    )
+
+    assert not result.error
+    assert result.data["targets"] == targets
+    assert len(calls) == 1
+    assert calls[0].data == {"entity_id": targets}
+
+
+@pytest.mark.usefixtures("setup")
+async def test_bulk_service_call_validates_every_target_before_running(
+    hass: HomeAssistant,
+) -> None:
+    """One missing, hidden or wrong-domain target rejects the entire batch."""
+    hass.states.async_set("light.other", "off")
+    async_expose_entity(hass, "conversation", "light.other", True)
+    calls = async_mock_service(hass, "light", "turn_on")
+
+    for targets in (
+        ["light.lamp", "light.missing"],
+        ["light.lamp", "switch.hidden"],
+        ["light.lamp", "switch.wrong_domain"],
+    ):
+        result = await _call(hass, service="light.turn_on", target_devices=targets)
+        assert result.error
+    assert not calls
+
+
+@pytest.mark.usefixtures("setup")
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"service": "light.turn_on"},
+        {
+            "service": "light.turn_on",
+            "target_device": "light.lamp",
+            "target_devices": ["light.lamp"],
+        },
+        {"service": "light.turn_on", "target_devices": []},
+        {
+            "service": "light.turn_on",
+            "target_devices": [f"light.item_{index}" for index in range(101)],
+        },
+    ],
+)
+async def test_bulk_target_shape_is_bounded(hass: HomeAssistant, args: dict[str, object]) -> None:
+    """Exactly one target field is required and bulk calls are bounded."""
+    calls = async_mock_service(hass, "light", "turn_on")
+    result = await _call(hass, **args)
+    assert result.error
+    assert not calls

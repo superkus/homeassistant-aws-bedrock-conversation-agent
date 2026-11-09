@@ -258,21 +258,30 @@ def _scene_is_sensitive(hass: HomeAssistant, scene: State) -> bool:
 def service_call_action(
     hass: HomeAssistant, service: object, target: object
 ) -> SensitiveAction | None:
-    """Assess an explicit service call on one entity (HassCallService)."""
-    if not isinstance(service, str) or not isinstance(target, str):
+    """Assess an explicit service call on one or more entities."""
+    if not isinstance(service, str):
         return None
-    name = _name(hass, target)
+    if isinstance(target, str):
+        targets = [target]
+    elif isinstance(target, list) and all(isinstance(item, str) for item in target):
+        targets = list(dict.fromkeys(target))
+    else:
+        return None
+    names = tuple(_name(hass, entity_id) for entity_id in targets)
     if service in ("lock.unlock", "lock.open"):
-        return SensitiveAction("unlock", (name,))
+        return SensitiveAction("unlock", names)
     if service == "script.turn_on":
-        return SensitiveAction("run", (name,))
-    state = hass.states.get(target)
-    if service in ("cover.open_cover", "cover.set_cover_position") and (
+        return SensitiveAction("run", names)
+    states = [hass.states.get(entity_id) for entity_id in targets]
+    if service in ("cover.open_cover", "cover.set_cover_position") and any(
         state is None or state.attributes.get("device_class") in SENSITIVE_COVER_DEVICE_CLASSES
+        for state in states
     ):
-        return SensitiveAction("open", (name,))
-    if service == "scene.turn_on" and (state is None or _scene_is_sensitive(hass, state)):
-        return SensitiveAction("activate", (name,))
+        return SensitiveAction("open", names)
+    if service == "scene.turn_on" and any(
+        state is None or _scene_is_sensitive(hass, state) for state in states
+    ):
+        return SensitiveAction("activate", names)
     return None
 
 
@@ -344,7 +353,8 @@ def assess(
     args = tool_input.tool_args or {}
 
     if base_name == SERVICE_TOOL_NAME:
-        return service_call_action(hass, args.get("service"), args.get("target_device"))
+        target = args.get("target_devices", args.get("target_device"))
+        return service_call_action(hass, args.get("service"), target)
     if name.endswith(_CALL_ACTION_TOOL):
         # Can call any action on any target: always ask, naming both.
         return SensitiveAction("act", (_describe_call_action(hass, args),))

@@ -122,7 +122,7 @@ What is held:
 - playing a web URL on a media player (searching the media library is not held),
 - state-changing tools from integrations it does not know, for example MCP servers. Their "read-only" hints are not trusted, because they come from the remote server.
 
-For each held action, the question names at most five targets and summarizes the rest ("… and 3 more"). The question can contain several action descriptions. A model response may request at most ten tool calls; if it requests more, the entire batch is rejected before any call runs.
+For each held action, the question names at most five targets and summarizes the rest ("… and 3 more"). The question can contain several action descriptions. A model response may contain at most 128 raw tool calls. The integration collapses homogeneous `HassCallService` calls into bulk operations, then allows at most 10 distinct operations. If either limit is exceeded, the entire response is rejected before any tool runs.
 
 Intents that target devices by area, by the name "all", by a blank name or by a name several devices share are checked against every device they can reach.
 
@@ -167,7 +167,8 @@ logger:
 | "Could not reach AWS Bedrock." | No connection to AWS, or AWS sent nothing for 15 seconds (connect timeout 5 seconds, one retry) | Check the network connection to AWS |
 | "I could not complete that request." | The model used all its tool rounds | Raise **Maximum tool rounds per request** in **Reconfigure agent**, or rephrase |
 | "The model sent an invalid tool request." | The model returned malformed JSON for a tool call | Rephrase the request or choose a model that reliably supports tool use |
-| "The model sent too many tool requests in one response (maximum 10). No tools were run." | The model requested more than the fixed ten-call response limit | Ask for fewer actions at once; the rejected batch did not run |
+| "The model sent too many tool requests in one response (maximum 128). No tools were run." | The model exceeded the absolute raw-call safety limit | Rephrase the request; the rejected batch did not run |
+| "The model requested too many distinct tool operations in one response (maximum 10). No tools were run." | More than ten operations remained after identical service calls were grouped | Ask for fewer different actions at once; the rejected batch did not run |
 | An action through **AWS Bedrock Services** fails, or the model reports that it did not finish within 10 seconds | `HassCallService` received a Home Assistant service error, or its blocking service call exceeded the 10-second execution limit | Check the Home Assistant log and try the service directly. The tool returns a failure result to the model instead of reporting success. |
 | "The conversation is too long for this model." | Context window full | Start a new conversation |
 | "The answer was cut off by the token limit." | The reply hit **Maximum tokens in a response** in the middle of a tool call | Raise **Maximum tokens in a response** in **Reconfigure agent** |

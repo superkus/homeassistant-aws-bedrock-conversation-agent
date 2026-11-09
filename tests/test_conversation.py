@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import Counter
+import contextlib
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import chat_session, intent, llm
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, async_mock_service
@@ -26,6 +30,7 @@ from custom_components.bedrock_conversation.const import (
     CONF_PROMPT,
     HOME_LLM_API_ID,
     MAX_TOOL_CALLS_PER_RESPONSE,
+    MAX_TOOL_OPERATIONS_PER_RESPONSE,
 )
 from custom_components.bedrock_conversation.conversation import BedrockConversationEntity
 
@@ -159,7 +164,8 @@ async def test_service_tool_calls(hass: HomeAssistant, bedrock: FakeBedrock, age
     result = await _ask(hass, agent_id, "Apaga las dos lámparas")
 
     assert result.response.speech["plain"]["speech"] == "He apagado las dos lámparas."
-    assert sorted(c.data["entity_id"] for c in calls) == ["light.lamp_a", "light.lamp_b"]
+    assert len(calls) == 1
+    assert calls[0].data["entity_id"] == ["light.lamp_a", "light.lamp_b"]
     second = bedrock.calls[1]
     assert [u["toolUseId"] for u in _tool_uses(second)] == ["toolu_A", "toolu_B"]
     results = _tool_results(second)
@@ -167,6 +173,134 @@ async def test_service_tool_calls(hass: HomeAssistant, bedrock: FakeBedrock, age
     assert all(r["content"][0]["json"]["result"] == "success" for r in results)
     # Bedrock requires alternating roles: user, assistant(toolUse), user(toolResult)
     assert [m["role"] for m in second["messages"]] == ["user", "assistant", "user"]
+
+
+@pytest.mark.parametrize(
+    "entry_options",
+    [
+        {
+            CONF_MODEL_ID: MODEL,
+            CONF_PROMPT: "Eres un asistente.",
+            CONF_LLM_HASS_API: [HOME_LLM_API_ID, llm.LLM_API_ASSIST],
+        }
+    ],
+)
+async def test_assist_tool_interleaved_with_grouped_service_calls(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """Assist and grouped service calls each keep one result and streamed text."""
+    hass.states.async_set("cover.shade_a", "open", {"device_class": "shade"})
+    hass.states.async_set("cover.shade_b", "open", {"device_class": "shade"})
+    for entity_id in ("cover.shade_a", "cover.shade_b"):
+        async_expose_entity(hass, "conversation", entity_id, True)
+    service_calls = async_mock_service(hass, "cover", "close_cover")
+    original_ids = ["service-a", "assist-state", "service-b"]
+    bedrock.responses = [
+        tool_events(
+            (
+                original_ids[0],
+                "HassCallService",
+                json.dumps({"service": "cover.close_cover", "target_device": "cover.shade_a"}),
+            ),
+            (
+                original_ids[1],
+                "homeassistant__GetLiveContext",
+                json.dumps({"domain": "cover"}),
+            ),
+            (
+                original_ids[2],
+                "HassCallService",
+                json.dumps({"service": "cover.close_cover", "target_device": "cover.shade_b"}),
+            ),
+            text="Voy a comprobar y cerrar los estores.",
+        ),
+        text_events("Los dos estores están cerrados."),
+    ]
+
+    result = await _ask(hass, agent_id, "Comprueba y cierra los estores")
+
+    assert result.response.speech["plain"]["speech"] == "Los dos estores están cerrados."
+    assert len(service_calls) == 1
+    assert service_calls[0].data == {"entity_id": ["cover.shade_a", "cover.shade_b"]}
+
+    follow_up = bedrock.calls[1]
+    assert [item["toolUseId"] for item in _tool_uses(follow_up)] == original_ids
+    tool_results = _tool_results(follow_up)
+    assert Counter(item["toolUseId"] for item in tool_results) == Counter(original_ids)
+    by_id = {item["toolUseId"]: item for item in tool_results}
+    assert by_id["service-a"]["content"] == by_id["service-b"]["content"]
+    assert by_id["service-a"]["content"][0]["json"]["result"] == "success"
+    assert "Live Context" in by_id["assist-state"]["content"][0]["json"]["result"]
+    assert [message["role"] for message in follow_up["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assistant_blocks = follow_up["messages"][1]["content"]
+    assert assistant_blocks[0] == {"text": "Voy a comprobar y cerrar los estores."}
+
+    with (
+        chat_session.async_get_chat_session(
+            hass, result.conversation_id, context=Context()
+        ) as session,
+        conversation.async_get_chat_log(hass, session) as chat_log,
+    ):
+        streamed = next(
+            item
+            for item in chat_log.content
+            if isinstance(item, conversation.AssistantContent) and item.tool_calls
+        )
+        recorded_results = [
+            item
+            for item in chat_log.content
+            if isinstance(item, conversation.ToolResultContent)
+            and item.tool_call_id in original_ids
+        ]
+    assert streamed.content == "Voy a comprobar y cerrar los estores."
+    assert [call.id for call in streamed.tool_calls or []] == original_ids
+    assert Counter(item.tool_call_id for item in recorded_results) == Counter(original_ids)
+
+
+async def test_grouped_service_failure_reaches_every_original_tool_id(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """One canonical service failure is reported for every grouped tool use."""
+    for entity_id in ("light.lamp_a", "light.lamp_b"):
+        hass.states.async_set(entity_id, "off")
+        async_expose_entity(hass, "conversation", entity_id, True)
+    service_calls = async_mock_service(
+        hass,
+        "light",
+        "turn_on",
+        raise_exception=HomeAssistantError("service exploded"),
+    )
+    bedrock.responses = [
+        tool_events(
+            (
+                "failure-a",
+                "HassCallService",
+                json.dumps({"service": "light.turn_on", "target_device": "light.lamp_a"}),
+            ),
+            (
+                "failure-b",
+                "HassCallService",
+                json.dumps({"service": "light.turn_on", "target_device": "light.lamp_b"}),
+            ),
+        ),
+        text_events("No pude encender las lámparas."),
+    ]
+
+    await _ask(hass, agent_id, "Enciende las lámparas")
+
+    assert len(service_calls) == 1
+    tool_results = _tool_results(bedrock.calls[1])
+    assert [item["toolUseId"] for item in tool_results] == ["failure-a", "failure-b"]
+    assert all(item["status"] == "error" for item in tool_results)
+    errors = [item["content"][0]["json"] for item in tool_results]
+    assert errors == [
+        {"error": "light.turn_on failed: service exploded"},
+        {"error": "light.turn_on failed: service exploded"},
+    ]
 
 
 async def test_unexposed_entity_rejected(
@@ -412,6 +546,70 @@ async def test_no_identity_is_refused(
     assert not garage
 
 
+async def test_confirmed_operations_start_concurrently_and_keep_result_order(
+    config_entry,
+) -> None:
+    """Confirmed canonical operations start together and retain pending order."""
+    agent = next(iter(config_entry.subentries.values()))
+    entity = BedrockConversationEntity(config_entry, agent)
+    entity.entity_id = "conversation.test"
+    values = [30, 10, 20]
+    pending = MagicMock(
+        calls=[
+            llm.ToolInput(tool_name=f"tool_{value}", tool_args={"value": value}) for value in values
+        ],
+        expired=False,
+    )
+    pending.same_requester.return_value = True
+    entity._pending["conversation"] = pending
+    chat_log = MagicMock(conversation_id="conversation", llm_api=MagicMock())
+    user_input = MagicMock(text="yes")
+    started = {value: asyncio.Event() for value in values}
+    release = {value: asyncio.Event() for value in values}
+    active: set[int] = set()
+
+    async def delayed_call(_llm_api, call) -> llm.ToolResult:
+        value = call.tool_args["value"]
+        active.add(value)
+        started[value].set()
+        try:
+            await release[value].wait()
+        finally:
+            active.remove(value)
+        return llm.ToolResult(data={"value": value})
+
+    resolve_task = asyncio.create_task(entity._async_resolve_pending(user_input, chat_log))
+    start_error: str | None = None
+    try:
+        with patch.object(entity, "_async_call_tool", side_effect=delayed_call):
+            try:
+                async with asyncio.timeout(0.2):
+                    await asyncio.gather(*(event.wait() for event in started.values()))
+            except TimeoutError:
+                missing = [value for value, event in started.items() if not event.is_set()]
+                start_error = f"confirmed operations did not start concurrently; missing {missing}"
+
+            if start_error is None:
+                for value in reversed(values):
+                    release[value].set()
+                await asyncio.wait_for(resolve_task, timeout=1)
+                tool_results = [
+                    call.args[0]
+                    for call in chat_log.async_add_assistant_content_without_tools.call_args_list
+                    if isinstance(call.args[0], conversation.ToolResultContent)
+                ]
+                assert [result.result.data["value"] for result in tool_results] == values
+    finally:
+        if not resolve_task.done():
+            resolve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await resolve_task
+        assert not active
+
+    if start_error is not None:
+        pytest.fail(start_error)
+
+
 async def test_duplicate_held_calls_run_once(
     hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str, garage: list
 ) -> None:
@@ -522,6 +720,38 @@ async def test_other_agents_cannot_unlock_with_our_api(hass: HomeAssistant, conf
         )
     )
     assert result.error
+    assert not unlocks
+
+
+async def test_other_agents_cannot_unlock_bulk_targets_with_our_api(
+    hass: HomeAssistant, config_entry
+) -> None:
+    """Bulk sensitive targets cannot bypass another agent's confirmation refusal."""
+    targets = ["lock.front_door", "lock.back_door"]
+    for entity_id in targets:
+        hass.states.async_set(entity_id, "locked")
+        async_expose_entity(hass, "conversation", entity_id, True)
+    unlocks = async_mock_service(hass, "lock", "unlock")
+    context = llm.LLMContext(
+        platform="openai_conversation",
+        context=Context(),
+        language="es",
+        assistant="conversation",
+        device_id=None,
+    )
+    api = await llm.async_get_api(hass, HOME_LLM_API_ID, context)
+
+    result = await api.async_call_tool(
+        llm.ToolInput(
+            tool_name="HassCallService",
+            tool_args={"service": "lock.unlock", "target_devices": targets},
+        )
+    )
+
+    assert result.error
+    assert result.data == {
+        "error": "lock.unlock needs confirmation, which this assistant cannot ask for"
+    }
     assert not unlocks
 
 
@@ -674,3 +904,275 @@ async def test_tool_calls_per_response_are_bounded(
     assert "No tools were run" in result.response.speech["plain"]["speech"]
     assert not lights
     assert len(bedrock.calls) == 1
+
+
+async def test_many_per_device_service_calls_are_collapsed(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """A model's 75 per-cover calls run as one bounded HA service operation."""
+    targets = [f"cover.shade_{index}" for index in range(75)]
+    for entity_id in targets:
+        hass.states.async_set(entity_id, "open", {"device_class": "shade"})
+        async_expose_entity(hass, "conversation", entity_id, True)
+    calls = async_mock_service(hass, "cover", "close_cover")
+    tool_calls = [
+        (
+            f"tool_{index}",
+            "HassCallService",
+            json.dumps({"service": "cover.close_cover", "target_device": entity_id}),
+        )
+        for index, entity_id in enumerate(targets)
+    ]
+    bedrock.responses = [
+        tool_events(*tool_calls),
+        text_events("He cerrado los 75 estores."),
+    ]
+
+    result = await _ask(hass, agent_id, "Cierra todos los estores")
+
+    assert result.response.speech["plain"]["speech"] == "He cerrado los 75 estores."
+    assert len(calls) == 1
+    assert calls[0].data == {"entity_id": targets}
+    results = _tool_results(bedrock.calls[1])
+    assert [item["toolUseId"] for item in results] == [f"tool_{index}" for index in range(75)]
+    assert all(item["content"][0]["json"]["result"] == "success" for item in results)
+    assert all("targets" not in item["content"][0]["json"] for item in results)
+
+
+async def test_model_bulk_service_call_keeps_complete_target_list(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """A single model-originated bulk call may return its complete target list."""
+    targets = [f"light.lamp_{index}" for index in range(3)]
+    for entity_id in targets:
+        hass.states.async_set(entity_id, "off")
+        async_expose_entity(hass, "conversation", entity_id, True)
+    calls = async_mock_service(hass, "light", "turn_on")
+    bedrock.responses = [
+        tool_events(
+            (
+                "bulk-call",
+                "HassCallService",
+                json.dumps({"service": "light.turn_on", "target_devices": targets}),
+            )
+        ),
+        text_events("He encendido las luces."),
+    ]
+
+    await _ask(hass, agent_id, "Enciende las luces")
+
+    assert len(calls) == 1
+    result = _tool_results(bedrock.calls[1])[0]["content"][0]["json"]
+    assert result == {"result": "success", "service": "light.turn_on", "targets": targets}
+
+
+async def test_distinct_tool_operations_remain_bounded(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """Grouping does not remove the cap on genuinely different operations."""
+    hass.states.async_set("light.lamp", "off")
+    async_expose_entity(hass, "conversation", "light.lamp", True)
+    calls = async_mock_service(hass, "light", "turn_on")
+    bedrock.responses = [
+        tool_events(
+            *[
+                (
+                    f"tool_{index}",
+                    "HassCallService",
+                    json.dumps(
+                        {
+                            "service": "light.turn_on",
+                            "target_device": "light.lamp",
+                            "brightness_pct": index,
+                        }
+                    ),
+                )
+                for index in range(MAX_TOOL_OPERATIONS_PER_RESPONSE + 1)
+            ]
+        )
+    ]
+
+    result = await _ask(hass, agent_id, "Cambia muchas veces la luz")
+
+    assert result.response.response_type == intent.IntentResponseType.ERROR
+    speech = result.response.speech["plain"]["speech"]
+    assert str(MAX_TOOL_OPERATIONS_PER_RESPONSE) in speech
+    assert "No tools were run" in speech
+    assert not calls
+
+
+async def test_many_sensitive_service_calls_collapse_before_confirmation(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """A grouped garage operation asks once and runs one service call after yes."""
+    targets = [f"cover.garage_{index}" for index in range(6)]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(
+            entity_id,
+            "closed",
+            {"friendly_name": f"Garaje {index}", "device_class": "garage"},
+        )
+        async_expose_entity(hass, "conversation", entity_id, True)
+    calls = async_mock_service(hass, "cover", "open_cover")
+    bedrock.responses = [
+        tool_events(
+            *[
+                (
+                    f"tool_{index}",
+                    "HassCallService",
+                    json.dumps({"service": "cover.open_cover", "target_device": entity_id}),
+                )
+                for index, entity_id in enumerate(targets)
+            ]
+        )
+    ]
+
+    first = await _ask(hass, agent_id, "Abre todos los garajes")
+
+    assert not calls
+    question = first.response.speech["plain"]["speech"]
+    assert question.startswith("Necesito tu confirmación para abrir Garaje 0")
+    assert "y 1 más" in question
+    assert question.endswith("¿Lo hago?")
+
+    bedrock.responses = [text_events("He abierto los garajes.")]
+    await _ask(hass, agent_id, "Sí, hazlo", first.conversation_id)
+
+    assert len(calls) == 1
+    assert calls[0].data == {"entity_id": targets}
+
+
+async def test_grouped_service_operations_start_concurrently_and_keep_result_order(
+    hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str
+) -> None:
+    """Delayed canonical operations start together and report in stable group order."""
+    targets = [f"light.lamp_{index}" for index in range(6)]
+    for entity_id in targets:
+        hass.states.async_set(entity_id, "off")
+        async_expose_entity(hass, "conversation", entity_id, True)
+
+    operation_values = [30.0, 10.0, 20.0]
+    started = {value: asyncio.Event() for value in operation_values}
+    release = {value: asyncio.Event() for value in operation_values}
+    active: set[float] = set()
+    service_order: list[float] = []
+
+    async def delayed_turn_on(call) -> None:
+        value = call.data["brightness_pct"]
+        service_order.append(value)
+        active.add(value)
+        started[value].set()
+        try:
+            await release[value].wait()
+        finally:
+            active.remove(value)
+
+    hass.services.async_register("light", "turn_on", delayed_turn_on)
+    tool_calls = [
+        (
+            "operation-a-1",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[0],
+                    "brightness_pct": 30,
+                }
+            ),
+        ),
+        (
+            "operation-b-1",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[2],
+                    "brightness_pct": 10,
+                }
+            ),
+        ),
+        (
+            "operation-a-2",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[1],
+                    "brightness_pct": 30,
+                }
+            ),
+        ),
+        (
+            "operation-c-1",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[4],
+                    "brightness_pct": 20,
+                }
+            ),
+        ),
+        (
+            "operation-b-2",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[3],
+                    "brightness_pct": 10,
+                }
+            ),
+        ),
+        (
+            "operation-c-2",
+            "HassCallService",
+            json.dumps(
+                {
+                    "service": "light.turn_on",
+                    "target_device": targets[5],
+                    "brightness_pct": 20,
+                }
+            ),
+        ),
+    ]
+    expected_result_ids = [
+        "operation-a-1",
+        "operation-a-2",
+        "operation-b-1",
+        "operation-b-2",
+        "operation-c-1",
+        "operation-c-2",
+    ]
+    bedrock.responses = [tool_events(*tool_calls), text_events("Luces ajustadas.")]
+    ask_task = asyncio.create_task(_ask(hass, agent_id, "Ajusta las luces"))
+    start_error: str | None = None
+
+    try:
+        try:
+            async with asyncio.timeout(0.2):
+                await asyncio.gather(*(event.wait() for event in started.values()))
+        except TimeoutError:
+            missing = [value for value, event in started.items() if not event.is_set()]
+            start_error = f"canonical operations did not start concurrently; missing {missing}"
+
+        if start_error is None:
+            # Complete out of order. User-visible tool results must still follow
+            # canonical operation order and each group's original ID order.
+            for value in reversed(operation_values):
+                release[value].set()
+            result = await asyncio.wait_for(ask_task, timeout=1)
+            assert result.response.speech["plain"]["speech"] == "Luces ajustadas."
+            assert Counter(service_order) == Counter(operation_values)
+            assert [item["toolUseId"] for item in _tool_results(bedrock.calls[1])] == (
+                expected_result_ids
+            )
+    finally:
+        if not ask_task.done():
+            ask_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ask_task
+        assert not active
+
+    if start_error is not None:
+        pytest.fail(start_error)
