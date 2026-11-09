@@ -6,7 +6,7 @@
 
 A Home Assistant custom integration that uses Amazon Bedrock models as a conversation agent, so you can talk to your home and control exposed devices.
 
-Version 2.0.1 requires **Home Assistant 2026.11.0 or later**. It fixes the 2026.11 breakage where 1.x stopped answering (an `AttributeError` on `requires_admin` in its LLM API). Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
+Version 2.0.2 requires **Home Assistant 2026.11.0 or later**. It fixes the 2026.11 breakage where 1.x stopped answering (an `AttributeError` on `requires_admin` in its LLM API). Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
 
 This is a fork of [cronus42/homeassistant-aws-bedrock-conversation-agent](https://github.com/cronus42/homeassistant-aws-bedrock-conversation-agent), maintained by [superkus](https://github.com/superkus).
 

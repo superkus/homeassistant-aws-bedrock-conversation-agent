@@ -6,7 +6,7 @@
 custom_components/bedrock_conversation/
 ├── __init__.py       # Entry setup/unload, registers the "AWS Bedrock Services" API, migrations 1 → 2.1 → 3.1
 ├── client.py         # BedrockClient: boto3 clients, region list, model listing, ConverseStream,
-│                     # inference profile and prompt cache fallbacks, error translation
+│                     # inference profile, temperature and prompt cache fallbacks, error translation
 ├── config_flow.py    # Setup (region + credentials → model → first agent), reauth, reconfigure,
 │                     # AgentSubentryFlow (add / reconfigure agent)
 ├── confirmation.py   # assess(): which tool calls are sensitive; is_affirmative(); the fixed question
@@ -40,7 +40,7 @@ If the stream stops with `max_tokens` while a tool call's arguments are incomple
 
 `HassCallService` in `llm_api.py` refuses sensitive services (`confirmation.service_call_action`) when called by another platform's agent (`llm_context.platform != DOMAIN`), because only this agent can ask for confirmation.
 
-`BedrockClient.async_converse_stream` retries once, before anything was streamed, when Bedrock reports that the model needs an inference profile (it picks a system profile for the region, see `_profile_preference`) or that prompt caching is not supported (cache points are removed). Both are remembered per model for the client's lifetime.
+`BedrockClient.async_converse_stream` can make one fallback attempt for each model-compatibility error before yielding the first event: when Bedrock reports that the model needs an inference profile (it picks a system profile for the region, see `_profile_preference`), that a newer model rejects the deprecated `temperature` parameter (temperature is then omitted for that model), or that prompt caching is not supported (cache points are removed). The three fallbacks can compose within one request, and each decision is remembered per model for the client's lifetime.
 
 Errors are mapped in `client.translate_error` and `BedrockConversationEntity._error` to the translated messages under `exceptions` in `strings.json`. Authentication errors also start a reauth flow.
 

@@ -14,7 +14,7 @@ make test                                   # from the repo root: .venv + covera
 
 | File | Covers |
 |------|--------|
-| `test_client.py` | Error translation, model listing, streaming, inference profile and prompt cache fallbacks |
+| `test_client.py` | Error translation, model listing, streaming, inference profile, temperature and prompt cache fallbacks |
 | `test_config_flow.py` | Setup (region → models → first agent), errors, duplicates, reauth, reconfigure (model set on every agent), add and reconfigure agent |
 | `test_init.py` | Migrations 1 → 2.1 (prompts, titles) and 2 → 3.1 (sub-entry, entity ID kept), setup errors, API registration |
 | `test_confirmation.py` | Affirmative answers, the fixed question, and which tool calls are held (`assess`) |

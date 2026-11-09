@@ -161,7 +161,8 @@ logger:
 | "AWS accepted these credentials, but model metadata could not be listed" | IAM policy is missing a model-listing permission | Grant `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` as shown above |
 | "No models could be listed for this region" | Metadata discovery failed or returned no matching active streaming text models or profiles | Type the model or inference profile ID, or choose another region with **Reconfigure** |
 | "Access to this Bedrock model was denied (...)" | The selected model is not accessible in this region, or IAM lacks `bedrock:InvokeModelWithResponseStream` | Check model access in the Bedrock console and the invocation permission in the IAM policy |
-| "AWS Bedrock returned an error (ValidationException)" | Often a model that does not support tool use or streaming | In **Reconfigure agent**, choose another model or remove device control |
+| "AWS Bedrock returned an error (ValidationException)" | Often a model parameter, tool schema, or message-history incompatibility | Check the Home Assistant log for the full AWS validation message; choose another model if the integration cannot adapt automatically |
+| `temperature` is deprecated for this model | Newer reasoning model does not accept temperature | The integration retries without temperature and remembers that choice automatically |
 | "The answer was blocked by a content filter." | Bedrock stopped the response because of a model content policy or configured guardrail | Rephrase the request; if you configured a Bedrock guardrail, review its policy |
 | "AWS Bedrock took too long to answer." | A whole request, including all tool rounds, took more than 60 seconds | In **Reconfigure agent**, use a faster model or lower the maximum tokens or tool rounds |
 | "Could not reach AWS Bedrock." | No connection to AWS, or AWS sent nothing for 15 seconds (connect timeout 5 seconds, one retry) | Check the network connection to AWS |
