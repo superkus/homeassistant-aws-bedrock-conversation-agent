@@ -33,6 +33,7 @@ from custom_components.bedrock_conversation.const import (
     MAX_TOOL_OPERATIONS_PER_RESPONSE,
 )
 from custom_components.bedrock_conversation.conversation import BedrockConversationEntity
+from custom_components.bedrock_conversation.llm_api import HassGetStateTool
 
 from .conftest import MODEL, FakeBedrock, text_events, tool_events
 from .test_client import TEXT_DELTA, FakeEventStream, mid_stream_errors
@@ -78,6 +79,20 @@ def _tool_uses(call: dict) -> list[dict]:
         for block in message["content"]
         if "toolUse" in block
     ]
+
+
+@pytest.fixture
+def state_tool_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Record observable state-tool invocations without replacing their behavior."""
+    calls: list[dict[str, object]] = []
+    original = HassGetStateTool.async_call
+
+    async def tracked_call(self, hass, tool_input, llm_context):
+        calls.append(dict(tool_input.tool_args))
+        return await original(self, hass, tool_input, llm_context)
+
+    monkeypatch.setattr(HassGetStateTool, "async_call", tracked_call)
+    return calls
 
 
 async def test_answer_and_memory(hass: HomeAssistant, bedrock: FakeBedrock, agent_id: str) -> None:
@@ -1176,3 +1191,247 @@ async def test_grouped_service_operations_start_concurrently_and_keep_result_ord
 
     if start_error is not None:
         pytest.fail(start_error)
+
+
+async def test_many_per_device_state_calls_are_collapsed(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """A model's 75 state calls become one read with compact per-ID results."""
+    targets = [f"cover.shade_{index}" for index in range(75)]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(
+            entity_id,
+            "open" if index % 2 else "closed",
+            {"friendly_name": f"Estor {index}", "device_class": "shade"},
+        )
+        async_expose_entity(hass, "conversation", entity_id, True)
+    bedrock.responses = [
+        tool_events(
+            *[
+                (
+                    f"state_{index}",
+                    "HassGetState",
+                    json.dumps({"entity_id": entity_id}),
+                )
+                for index, entity_id in enumerate(targets)
+            ]
+        ),
+        text_events("Hay 38 estores cerrados y 37 abiertos."),
+    ]
+
+    result = await _ask(hass, agent_id, "Dime el estado de las persianas")
+
+    assert result.response.speech["plain"]["speech"] == ("Hay 38 estores cerrados y 37 abiertos.")
+    results = _tool_results(bedrock.calls[1])
+    assert [item["toolUseId"] for item in results] == [f"state_{index}" for index in range(75)]
+    assert state_tool_calls == [{"entity_ids": targets}]
+    assert len(results) == 75
+    for index, item in enumerate(results):
+        data = item["content"][0]["json"]
+        assert data["entity_id"] == targets[index]
+        assert data["state"] == ("open" if index % 2 else "closed")
+        # Each original ID gets only its own state, not the 75-state bulk payload.
+        assert "entities" not in data
+
+
+async def test_oversized_original_bulk_state_call_is_rejected_without_collapse(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """An oversized original remains invalid even when all IDs are duplicates."""
+    entity_id = "light.lamp"
+    hass.states.async_set(entity_id, "on")
+    async_expose_entity(hass, "conversation", entity_id, True)
+    requested = [entity_id] * 101
+    bedrock.responses = [
+        tool_events(
+            (
+                "oversized-state",
+                "HassGetState",
+                json.dumps({"entity_ids": requested}),
+            )
+        ),
+        text_events("La solicitud era demasiado grande."),
+    ]
+
+    await _ask(hass, agent_id, "Consulta demasiados estados")
+
+    tool_result = _tool_results(bedrock.calls[1])[0]
+    assert tool_result.get("status") == "error"
+    assert "Invalid arguments" in tool_result["content"][0]["json"]["error"]
+    assert state_tool_calls == [{"entity_ids": requested}]
+
+
+async def test_null_singular_with_bulk_state_target_keeps_validation_error(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """A null singular field cannot be normalized into a valid bulk call."""
+    entity_id = "light.lamp"
+    hass.states.async_set(entity_id, "on")
+    async_expose_entity(hass, "conversation", entity_id, True)
+    original_args = {"entity_id": None, "entity_ids": [entity_id]}
+    bedrock.responses = [
+        tool_events(
+            (
+                "malformed-state",
+                "HassGetState",
+                json.dumps(original_args),
+            )
+        ),
+        text_events("La solicitud no era válida."),
+    ]
+
+    await _ask(hass, agent_id, "Consulta el estado")
+
+    tool_result = _tool_results(bedrock.calls[1])[0]
+    assert tool_result.get("status") == "error"
+    assert "Invalid arguments" in tool_result["content"][0]["json"]["error"]
+    assert state_tool_calls == [original_args]
+
+
+async def test_single_bulk_state_result_is_deduplicated_in_first_seen_order(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """One valid bulk original receives one compact result per unique entity."""
+    targets = ["sensor.second", "sensor.first", "sensor.third"]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(entity_id, str(index))
+        async_expose_entity(hass, "conversation", entity_id, True)
+    requested = [targets[0], targets[1], targets[0], targets[2], targets[1]]
+    bedrock.responses = [
+        tool_events(
+            (
+                "bulk-state",
+                "HassGetState",
+                json.dumps({"entity_ids": requested}),
+            )
+        ),
+        text_events("Estados consultados."),
+    ]
+
+    await _ask(hass, agent_id, "Consulta varios estados")
+
+    tool_results = _tool_results(bedrock.calls[1])
+    assert [item["toolUseId"] for item in tool_results] == ["bulk-state"]
+    data = tool_results[0]["content"][0]["json"]
+    assert [item["entity_id"] for item in data["entities"]] == targets
+    assert [item["state"] for item in data["entities"]] == ["0", "1", "2"]
+    assert len(state_tool_calls) == 1
+
+
+async def test_mixed_singular_and_bulk_state_results_preserve_original_order(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """Mixed originals receive compact data in their Bedrock tool-use order."""
+    targets = ["cover.alpha", "cover.beta", "cover.gamma", "cover.delta"]
+    for index, entity_id in enumerate(targets):
+        hass.states.async_set(entity_id, f"state-{index}")
+        async_expose_entity(hass, "conversation", entity_id, True)
+    original_ids = ["single-alpha", "bulk-beta-gamma", "single-delta"]
+    bedrock.responses = [
+        tool_events(
+            (
+                original_ids[0],
+                "HassGetState",
+                json.dumps({"entity_id": targets[0]}),
+            ),
+            (
+                original_ids[1],
+                "HassGetState",
+                json.dumps({"entity_ids": targets[1:3]}),
+            ),
+            (
+                original_ids[2],
+                "HassGetState",
+                json.dumps({"entity_id": targets[3]}),
+            ),
+        ),
+        text_events("Estados consultados."),
+    ]
+
+    result = await _ask(hass, agent_id, "Consulta los estores")
+
+    follow_up = bedrock.calls[1]
+    assert [message["role"] for message in follow_up["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    tool_results = _tool_results(follow_up)
+    assert [item["toolUseId"] for item in tool_results] == original_ids
+    assert tool_results[0]["content"][0]["json"]["entity_id"] == targets[0]
+    assert [
+        item["entity_id"] for item in tool_results[1]["content"][0]["json"]["entities"]
+    ] == targets[1:3]
+    assert tool_results[2]["content"][0]["json"]["entity_id"] == targets[3]
+    assert state_tool_calls == [{"entity_ids": targets}]
+
+    with (
+        chat_session.async_get_chat_session(
+            hass, result.conversation_id, context=Context()
+        ) as session,
+        conversation.async_get_chat_log(hass, session) as chat_log,
+    ):
+        recorded_ids = [
+            item.tool_call_id
+            for item in chat_log.content
+            if isinstance(item, conversation.ToolResultContent)
+            and item.tool_call_id in original_ids
+        ]
+    assert recorded_ids == original_ids
+
+
+async def test_collapsed_state_error_reaches_every_original_tool_id(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    agent_id: str,
+    state_tool_calls: list[dict[str, object]],
+) -> None:
+    """One atomic state failure is reported for every grouped tool use."""
+    known = "light.known"
+    missing = "light.missing"
+    hass.states.async_set(known, "on")
+    async_expose_entity(hass, "conversation", known, True)
+    bedrock.responses = [
+        tool_events(
+            (
+                "known-state",
+                "HassGetState",
+                json.dumps({"entity_id": known}),
+            ),
+            (
+                "missing-state",
+                "HassGetState",
+                json.dumps({"entity_id": missing}),
+            ),
+        ),
+        text_events("No pude consultar los estados."),
+    ]
+
+    await _ask(hass, agent_id, "Consulta dos estados")
+
+    tool_results = _tool_results(bedrock.calls[1])
+    assert [item["toolUseId"] for item in tool_results] == [
+        "known-state",
+        "missing-state",
+    ]
+    assert all(item.get("status") == "error" for item in tool_results)
+    assert [item["content"][0]["json"] for item in tool_results] == [
+        {"error": f"Unknown device {missing}"},
+        {"error": f"Unknown device {missing}"},
+    ]
+    assert state_tool_calls == [{"entity_ids": [known, missing]}]

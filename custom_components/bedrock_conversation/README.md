@@ -44,12 +44,12 @@ Use **Reconfigure** to change the region or credentials; after a region change, 
 | Maximum tokens | 1024 |
 | Temperature | 0.5 |
 | Maximum tool rounds per request | 10 |
-| Tool calls accepted in one model response | Up to 128 raw calls; homogeneous `HassCallService` calls are collapsed, then at most 10 distinct operations are allowed. Exceeding either limit rejects the response before any tool runs. |
+| Tool calls accepted in one model response | Up to 128 raw calls; homogeneous `HassCallService` and `HassGetState` calls are collapsed, then at most 10 distinct operations are allowed. Exceeding either limit rejects the response before any tool runs. |
 | Prompt caching (turned off automatically if the model does not support it) | On |
 
 ## "AWS Bedrock Services" API
 
-The 1.x API, kept for existing users. It adds the exposed devices to the prompt (a snapshot taken for the conversation), offers a read-only `HassGetState` tool for the current state of one exposed entity, and a `HassCallService` tool. Use `target_device` for one entity or `target_devices` for up to 100 exposed entities receiving the same service and settings. If a model emits one call per entity, homogeneous calls are automatically collapsed into one Home Assistant service operation. The tool allows these services:
+The 1.x API, kept for existing users. It adds the exposed devices to the prompt (a snapshot taken for the conversation) and offers `HassGetState` and `HassCallService`. `HassGetState` requires exactly one of `entity_id` for one entity or `entity_ids` for a list of 1–100 entity IDs before deduplication. It removes duplicates in first-seen order, then verifies that every entity exists and is exposed before returning any state. For `HassCallService`, use `target_device` for one entity or `target_devices` for up to 100 exposed entities receiving the same service and settings. If a model emits one call per entity, homogeneous state reads and service calls are automatically collapsed into one bounded operation. The service tool allows these services:
 
 - **light**: turn_on, turn_off, toggle
 - **switch**, **input_boolean**: turn_on, turn_off, toggle

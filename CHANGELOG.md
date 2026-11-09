@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Claude Opus 5.5 and other models that reject the deprecated `temperature` inference parameter are retried once without it. The result is remembered per model, so subsequent turns omit `temperature` without another failed request.
+- `HassGetState` now accepts `entity_ids` with up to 100 exposed entities. Models that emit one read per entity are collapsed into one bounded state read, while every original tool-use ID receives only its own compact state result.
 
 ## [2.0.1] - 2026-11-09
 
