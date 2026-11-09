@@ -6,7 +6,7 @@
 
 A Home Assistant custom integration that uses Amazon Bedrock models as a conversation agent, so you can talk to your home and control exposed devices.
 
-Version 2.0.0 requires **Home Assistant 2026.11.0 or later**. It fixes the 2026.11 breakage where 1.x stopped answering (an `AttributeError` on `requires_admin` in its LLM API). Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
+Version 2.0.1 requires **Home Assistant 2026.11.0 or later**. It fixes the 2026.11 breakage where 1.x stopped answering (an `AttributeError` on `requires_admin` in its LLM API). Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
 
 This is a fork of [cronus42/homeassistant-aws-bedrock-conversation-agent](https://github.com/cronus42/homeassistant-aws-bedrock-conversation-agent), maintained by [superkus](https://github.com/superkus).
 
@@ -15,7 +15,7 @@ This is a fork of [cronus42/homeassistant-aws-bedrock-conversation-agent](https:
 - **Bedrock Converse API with streaming** for every model; answers appear while they are generated.
 - **Model metadata discovery**: pick a region, then choose from the active streaming text models and system inference profiles returned by Bedrock's regional listing APIs. The list does not prove model access; Bedrock checks access and `bedrock:InvokeModelWithResponseStream` permission when the agent invokes the selected model or profile. You can also type any model ID, inference profile ID or ARN.
 - **Automatic inference profile fallback**: if a model can only be called through an inference profile, the integration finds a matching one for your region and uses it.
-- **Device control bounded by Home Assistant exposure settings**: the built-in **Device control** (Assist) API is the default and recommended choice. The 1.x **AWS Bedrock Services** API is still available. Both honor **Settings → Voice assistants → Expose**; unrestricted admin and third-party APIs are not offered.
+- **Device control bounded by Home Assistant exposure settings**: the built-in **Device control** (Assist) API is the default and recommended choice. The 1.x **AWS Bedrock Services** API is still available; it supports atomic bulk actions on up to 100 exposed entities and automatically groups models that emit one call per device. Both honor **Settings → Voice assistants → Expose**; unrestricted admin and third-party APIs are not offered.
 - **Spoken confirmation for sensitive actions**: unlocking, opening doors, garages and gates, running scripts and unknown state-changing tools are held until you answer a clear "yes" from the same device within 2 minutes. See [INSTALL.md](INSTALL.md#spoken-confirmation-for-sensitive-actions) for details and limitations.
 - **Conversation memory** through Home Assistant's chat log, including turns handled by other agents (such as local intent handling) and conversations started by an announcement.
 - **Prompt caching** on models that support it, to lower cost and latency.
@@ -39,7 +39,7 @@ See [INSTALL.md](INSTALL.md) for the IAM policy, all agent settings and troubles
 Version 1.0.37 does not work on Home Assistant 2026.11, so update both together:
 
 1. **Make a full Home Assistant backup** (**Settings → System → Backups**) and download it. Record the downloaded `.tar` filename and its local path, and keep that copy outside the Home Assistant host. Also record the current integration entry ID and conversation entity ID for the post-restore check.
-2. Update Home Assistant to 2026.11.0 or later and this integration to 2.0.0, then restart.
+2. Update Home Assistant to 2026.11.0 or later and this integration to 2.0.1 or later, then restart.
 3. Check **Settings → System → Logs** for both `Migrated <entry id> to version 2.1` and `Migrated <entry id> to version 3.1 (agent moved to a sub-entry)`, and that the entry is loaded with one agent.
 4. Ask the voice assistant something. The conversation entity ID is unchanged, so voice assistants and automations keep using it.
 5. **Never delete and re-add the integration** to fix a problem: the new entry gets a new ID, so voice assistants and automations that point at the old agent can stop working, and your settings are lost. Use **Reconfigure** (credentials, region) or **Reconfigure agent** instead.

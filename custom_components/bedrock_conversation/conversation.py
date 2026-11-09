@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 import json
 from typing import TYPE_CHECKING, Any, Literal, override
 
@@ -50,6 +51,8 @@ from .const import (
     DOMAIN,
     LOGGER,
     MAX_TOOL_CALLS_PER_RESPONSE,
+    MAX_TOOL_OPERATIONS_PER_RESPONSE,
+    SERVICE_TOOL_NAME,
     SUBENTRY_CONVERSATION,
     TURN_TIMEOUT,
     exposure_bounded_llm_api_ids,
@@ -70,6 +73,62 @@ _FAILED_STOP_REASONS = {
     "content_filtered": "response_blocked",
     "model_context_window_exceeded": "context_window_exceeded",
 }
+
+
+@dataclass(slots=True)
+class _ToolOperation:
+    """One operation after collapsing homogeneous service calls."""
+
+    call: llm.ToolInput
+    originals: list[llm.ToolInput]
+    execute_here: bool = False
+
+
+def _tool_operations(calls: list[llm.ToolInput]) -> list[_ToolOperation]:
+    """Collapse per-device HassCallService calls into bounded bulk operations.
+
+    Original calls remain in the assistant message so every Bedrock tool-use ID
+    receives a result. Collapsible calls are marked external and executed once
+    here; all other tools retain Home Assistant's normal execution path.
+    """
+    operations: list[_ToolOperation] = []
+    service_groups: dict[str, _ToolOperation] = {}
+
+    for call in calls:
+        if call.tool_name.rsplit("__", 1)[-1] != SERVICE_TOOL_NAME:
+            operations.append(_ToolOperation(call, [call]))
+            continue
+
+        args = dict(call.tool_args)
+        target_device = args.pop("target_device", None)
+        target_devices = args.pop("target_devices", None)
+        if (target_device is None) == (target_devices is None):
+            operations.append(_ToolOperation(call, [call]))
+            continue
+        targets = [target_device] if target_device is not None else target_devices
+        if not isinstance(targets, list) or not all(isinstance(target, str) for target in targets):
+            operations.append(_ToolOperation(call, [call]))
+            continue
+
+        key = json.dumps([call.tool_name, args], sort_keys=True, default=str)
+        if (operation := service_groups.get(key)) is None:
+            canonical_args = {**args, "target_devices": []}
+            operation = _ToolOperation(
+                llm.ToolInput(tool_name=call.tool_name, tool_args=canonical_args),
+                [],
+                execute_here=True,
+            )
+            service_groups[key] = operation
+            operations.append(operation)
+        operation.originals.append(call)
+        operation.call.tool_args["target_devices"].extend(targets)
+        call.external = True
+
+    for operation in service_groups.values():
+        operation.call.tool_args["target_devices"] = list(
+            dict.fromkeys(operation.call.tool_args["target_devices"])
+        )
+    return operations
 
 
 async def async_setup_entry(
@@ -187,14 +246,17 @@ class BedrockConversationEntity(
         chat_log.async_add_assistant_content_without_tools(
             conversation.AssistantContent(agent_id=self.entity_id, tool_calls=calls)
         )
-        for call in calls:
-            if cancel_reason is not None:
-                result = llm.ToolResult(
+        if cancel_reason is not None:
+            results = [
+                llm.ToolResult(
                     data={"status": "cancelled", "performed": False, "reason": cancel_reason},
                     error=True,
                 )
-            else:
-                result = await self._async_call_confirmed(chat_log.llm_api, call)
+                for _ in calls
+            ]
+        else:
+            results = await self._async_call_tools(chat_log.llm_api, calls)
+        for call, result in zip(calls, results, strict=True):
             chat_log.async_add_assistant_content_without_tools(
                 conversation.ToolResultContent(
                     agent_id=self.entity_id,
@@ -204,15 +266,24 @@ class BedrockConversationEntity(
                 )
             )
 
-    async def _async_call_confirmed(
+    async def _async_call_tools(
+        self, llm_api: llm.APIInstance, calls: list[llm.ToolInput]
+    ) -> list[llm.ToolResult]:
+        """Run a bounded call batch concurrently and retain input order."""
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(self._async_call_tool(llm_api, call)) for call in calls]
+        return [task.result() for task in tasks]
+
+    async def _async_call_tool(
         self, llm_api: llm.APIInstance, call: llm.ToolInput
     ) -> llm.ToolResult:
+        """Run a tool and always return a result for the chat log."""
         try:
             return await llm_api.async_call_tool(
                 llm.ToolInput(tool_name=call.tool_name, tool_args=call.tool_args, id=call.id)
             )
         except Exception as err:
-            LOGGER.warning("Confirmed action %s failed: %s", call.tool_name, err)
+            LOGGER.warning("Tool %s failed: %s", call.tool_name, err)
             return llm.ToolResult(
                 data={"error": type(err).__name__, "error_text": str(err)}, error=True
             )
@@ -394,37 +465,85 @@ class _DeltaStream:
         # Tool arguments are parsed once the stop reason is known, so a reply
         # cut off by the token limit gets a clear error.
         calls = [self._tool_input(block) for block in blocks]
-        for delta in self._post_stream_deltas(calls):
+        async for delta in self._post_stream_deltas(calls):
             yield delta
 
-    def _post_stream_deltas(
+    def _classify_tool_operations(
         self, calls: list[llm.ToolInput]
-    ) -> Iterator[conversation.AssistantContentDeltaDict | conversation.ToolResultContentDeltaDict]:
-        """Assess completed calls and yield confirmation-related deltas."""
-        held: list[tuple[llm.ToolInput, SensitiveAction]] = []
+    ) -> tuple[list[_ToolOperation], list[tuple[_ToolOperation, SensitiveAction]]]:
+        """Collapse and split calls into immediate and confirmation-held operations."""
+        operations = _tool_operations(calls)
+        if len(operations) > MAX_TOOL_OPERATIONS_PER_RESPONSE:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="too_many_tool_operations_in_response",
+                translation_placeholders={"maximum": str(MAX_TOOL_OPERATIONS_PER_RESPONSE)},
+            )
+
+        held: list[tuple[_ToolOperation, SensitiveAction]] = []
+        immediate: list[_ToolOperation] = []
         if self._confirm:
-            for call in calls:
-                if action := assess(self._entity.hass, call, self._tools.get(call.tool_name)):
-                    call.external = True
-                    held.append((call, action))
+            for operation in operations:
+                if action := assess(
+                    self._entity.hass,
+                    operation.call,
+                    self._tools.get(operation.call.tool_name),
+                ):
+                    for original in operation.originals:
+                        original.external = True
+                    held.append((operation, action))
+                elif operation.execute_here:
+                    immediate.append(operation)
+        else:
+            immediate = [operation for operation in operations if operation.execute_here]
+        return immediate, held
+
+    async def _post_stream_deltas(
+        self, calls: list[llm.ToolInput]
+    ) -> AsyncIterator[
+        conversation.AssistantContentDeltaDict | conversation.ToolResultContentDeltaDict
+    ]:
+        """Emit calls, execute immediate operations, and hold sensitive operations."""
+        immediate, held = self._classify_tool_operations(calls)
         if calls:
             yield {"tool_calls": calls}
+
+        # Valid HassCallService operations are executed here after collapsing,
+        # rather than letting HA create one task per original model call.
+        if immediate:
+            llm_api = self._chat_log.llm_api
+            if llm_api is None:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="tool_api_missing"
+                )
+            results = await self._entity._async_call_tools(
+                llm_api, [operation.call for operation in immediate]
+            )
+            for operation, result in zip(immediate, results, strict=True):
+                if len(operation.originals) > 1 and not result.error:
+                    result = _compact_grouped_result(result)
+                for original in operation.originals:
+                    yield _tool_result_from_result(original, result)
+
         if not held:
             return
 
-        if not self._entity.hold_for_confirmation(self._chat_log, [call for call, _ in held]):
+        canonical_calls = [operation.call for operation, _ in held]
+        if not self._entity.hold_for_confirmation(self._chat_log, canonical_calls):
             # Nobody identifiable could confirm (e.g. an automation calling
             # conversation.process): refuse, and let the model answer.
-            for call, _ in held:
-                yield _tool_result(call, CONFIRMATION_IMPOSSIBLE_RESULT, error=True)
+            for operation, _ in held:
+                for original in operation.originals:
+                    yield _tool_result(original, CONFIRMATION_IMPOSSIBLE_RESULT, error=True)
             return
         self.asked_confirmation = True
-        for call, _ in held:
-            yield _tool_result(call, CONFIRMATION_REQUIRED_RESULT)
-        # The question is written here, not by the model, and ends the turn.
+        for operation, _ in held:
+            for original in operation.originals:
+                yield _tool_result(original, CONFIRMATION_REQUIRED_RESULT)
+        # One action per collapsed operation lets wording summarize large groups.
         yield {
             "role": "assistant",
-            "content": confirmation_question(self._language, [a for _, a in held]),
+            "content": confirmation_question(self._language, [action for _, action in held]),
         }
 
     def _tool_input(self, block: dict[str, str]) -> llm.ToolInput:
@@ -439,6 +558,25 @@ class _DeltaStream:
             tool_name=self._names.to_ha.get(block["name"], block["name"]),
             tool_args=args if isinstance(args, dict) else {},
         )
+
+
+def _compact_grouped_result(result: llm.ToolResult) -> llm.ToolResult:
+    """Remove the repeated bulk target list from grouped success results."""
+    data = dict(result.data)
+    data.pop("targets", None)
+    return llm.ToolResult(data=data, error=result.error)
+
+
+def _tool_result_from_result(
+    call: llm.ToolInput, result: llm.ToolResult
+) -> conversation.ToolResultContentDeltaDict:
+    """Return a delta preserving the original Bedrock tool-use ID."""
+    return {
+        "role": "tool_result",
+        "tool_call_id": call.id,
+        "tool_name": call.tool_name,
+        "result": result,
+    }
 
 
 def _tool_result(

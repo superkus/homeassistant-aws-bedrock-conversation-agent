@@ -107,6 +107,12 @@
     },
     "response_too_long": {
       "message": "La respuesta se ha cortado por el límite de tokens. Usa Reconfigurar agente para aumentar \"Máximo de tokens por respuesta\"."
+    },
+    "too_many_tool_operations_in_response": {
+      "message": "El modelo ha solicitado demasiadas operaciones de herramientas distintas en una respuesta (máximo {maximum}). No se ha ejecutado ninguna."
+    },
+    "tool_api_missing": {
+      "message": "La ejecución de herramientas no está disponible para esta conversación."
     }
   },
   "config_subentries": {

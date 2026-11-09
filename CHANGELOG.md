@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1] - 2026-11-09
+
+### Fixed
+- Requests controlling many devices no longer fail at the old ten-tool-call limit. `HassCallService` now accepts `target_devices` with up to 100 exposed entities for one shared action.
+- Models that still emit one `HassCallService` call per entity are handled safely: calls with the same service and settings are collapsed into one Home Assistant service call, duplicate targets run once, every original Bedrock tool-use ID receives a result, and the entire batch is validated before any device changes.
+
+### Safety
+- An absolute limit of 128 raw tool calls bounds response parsing. After homogeneous service calls are grouped, at most 10 distinct operations are accepted. Either limit rejects the response before any tool runs.
+- Bulk sensitive actions are grouped into one spoken confirmation and one service call after confirmation.
+
 ## [2.0.0] - 2026-11-09
 
 Rewrite for **Home Assistant 2026.11.0 or later** (Python 3.14). **Make a full Home Assistant backup before upgrading**; going back to 1.x requires restoring it.
