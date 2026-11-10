@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-11-10
+
+### Added
+- Optional **Month-to-date account cost** sensor, backed by AWS Cost Explorer rather than a local token-price estimate. Home Assistant generates its entity ID from the entry and sensor names, so confirm the entity ID in Home Assistant before using it in an automation or dashboard.
+- The monetary sensor reports signed, account-wide Amazon Bedrock `UnblendedCost` across all regions for the current UTC billing month. It uses AWS's returned currency, `SensorStateClass.TOTAL`, a UTC month-start reset, and attributes for period, estimate status, metric, scope and last update. Billing adjustments, refunds and credits can reduce the value or make it negative; do not assume it is non-negative or always increases.
+- Default-off, entry-level **Reconfigure** toggle to enable the sensor. It polls every 12 hours and supports Home Assistant's manual entity refresh.
+- Each enabled entry creates a sensor entity. Entries with the same access-key ID share a coordinator and AWS requests. Different access-key IDs for the same AWS account cannot be detected or deduplicated without another permission, so enable one billing view per AWS account or treat the sensors as duplicates; never sum duplicate account-wide totals.
+
+### Safety and compatibility
+- The cost sensor is opt-in, so existing IAM policies and installations continue to work unchanged.
+- It requires a separate, optional IAM statement allowing `ce:GetCostAndUsage` on `Resource: "*"`. This action exposes account-wide billing data and does not support resource-level restrictions. Missing permission, delayed data, throttling or malformed Cost Explorer responses make only the sensor unavailable; conversation agents remain loaded.
+- Cost Explorer is queried through its partition-global endpoint and is not filtered to the configured Bedrock region, because inference profiles can route across regions and the sensor is explicitly account-wide.
+
 ## [2.0.3] - 2026-11-10
 
 ### Added

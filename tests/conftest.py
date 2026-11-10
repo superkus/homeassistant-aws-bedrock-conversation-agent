@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import copy
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
 
@@ -18,7 +20,11 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.bedrock_conversation.client import BedrockClient, ModelOption
+from custom_components.bedrock_conversation.client import (
+    BedrockClient,
+    CostExplorerData,
+    ModelOption,
+)
 from custom_components.bedrock_conversation.const import (
     CONF_AWS_ACCESS_KEY_ID,
     CONF_AWS_REGION,
@@ -102,6 +108,16 @@ class FakeBedrock:
         self.calls: list[dict[str, Any]] = []
         self.models = list(MODELS)
         self.validate_error: Exception | None = None
+        self.cost_error: Exception | None = None
+        self.cost_calls: list[tuple[date, date]] = []
+        self.cost_data = CostExplorerData(
+            amount=Decimal("1.234567"),
+            currency="USD",
+            period_start=date(2026, 11, 1),
+            period_end=date(2026, 11, 11),
+            estimated=True,
+            retrieved_at=datetime(2026, 11, 10, 12, 0, tzinfo=UTC),
+        )
 
     async def converse_stream(self, kwargs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         self.calls.append(copy.deepcopy(kwargs))
@@ -120,6 +136,12 @@ class FakeBedrock:
     async def list_models(self) -> list[ModelOption]:
         return self.models
 
+    async def get_cost(self, period_start: date, period_end: date) -> CostExplorerData:
+        self.cost_calls.append((period_start, period_end))
+        if self.cost_error:
+            raise self.cost_error
+        return self.cost_data
+
 
 @pytest.fixture
 def bedrock() -> FakeBedrock:
@@ -133,6 +155,11 @@ def bedrock() -> FakeBedrock:
         patch.object(BedrockClient, "async_setup", noop),
         patch.object(BedrockClient, "async_validate", lambda _c: fake.validate()),
         patch.object(BedrockClient, "async_list_models", lambda _c: fake.list_models()),
+        patch.object(
+            BedrockClient,
+            "async_get_month_to_date_cost",
+            lambda _c, start, end: fake.get_cost(start, end),
+        ),
         patch.object(
             BedrockClient, "async_converse_stream", lambda _c, kw: fake.converse_stream(kw)
         ),

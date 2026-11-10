@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 import re
 from typing import Final
@@ -49,6 +50,7 @@ CONF_MAX_TOKENS: Final = "max_tokens"
 CONF_TEMPERATURE: Final = "temperature"
 CONF_MAX_TOOL_CALL_ITERATIONS: Final = "max_tool_call_iterations"
 CONF_PROMPT_CACHING: Final = "prompt_caching"
+CONF_COST_SENSOR_ENABLED: Final = "cost_sensor_enabled"
 CONF_CONFIRM_SENSITIVE_ACTIONS: Final = "confirm_sensitive_actions"
 CONF_EXTRA_ATTRIBUTES_TO_EXPOSE: Final = "extra_attributes_to_expose"
 
@@ -76,7 +78,14 @@ DEFAULT_MAX_TOKENS: Final = 1024
 DEFAULT_TEMPERATURE: Final = 0.5
 DEFAULT_MAX_TOOL_CALL_ITERATIONS: Final = 10
 DEFAULT_PROMPT_CACHING: Final = True
+DEFAULT_COST_SENSOR_ENABLED: Final = False
 DEFAULT_CONFIRM_SENSITIVE_ACTIONS: Final = True
+
+# AWS Cost Explorer account-cost sensor
+COST_EXPLORER_UPDATE_INTERVAL: Final = timedelta(hours=12)
+COST_EXPLORER_METRIC: Final = "UnblendedCost"
+COST_EXPLORER_SERVICE: Final = "Amazon Bedrock"
+COST_SENSOR_KEY: Final = "month_to_date_account_cost"
 DEFAULT_EXTRA_ATTRIBUTES: Final = [
     "brightness",
     "rgb_color",

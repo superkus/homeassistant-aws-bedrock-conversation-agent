@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 import json
 import re
 from typing import Any
@@ -29,12 +30,14 @@ from .client import (
 from .const import (
     CONF_AWS_REGION,
     CONF_AWS_SESSION_TOKEN,
+    CONF_COST_SENSOR_ENABLED,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
     CONF_PROMPT,
     CONF_TEMPERATURE,
     DEFAULT_AWS_REGION,
+    DEFAULT_COST_SENSOR_ENABLED,
     DOMAIN,
     HOME_LLM_API_ID,
     LOGGER,
@@ -43,9 +46,14 @@ from .const import (
     exposure_bounded_llm_api_ids,
     is_default_title,
 )
+from .cost import (
+    BedrockCostCoordinator,
+    async_acquire_cost_coordinator,
+    async_release_cost_coordinator,
+)
 from .llm_api import BedrockServicesAPI
 
-PLATFORMS = [Platform.CONVERSATION]
+PLATFORMS = [Platform.CONVERSATION, Platform.SENSOR]
 
 # Unregisters the shared "AWS Bedrock Services" API when the last entry unloads.
 _API_UNREGISTER: HassKey[Callable[[], None]] = HassKey(f"{DOMAIN}_api_unregister")
@@ -58,6 +66,7 @@ class BedrockRuntimeData:
     """Runtime data for a config entry."""
 
     client: BedrockClient
+    cost_coordinator: BedrockCostCoordinator | None = None
 
 
 type BedrockConfigEntry = ConfigEntry[BedrockRuntimeData]
@@ -84,7 +93,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> N
         LOGGER.debug("Bedrock not reachable: %s", err)
         raise ConfigEntryNotReady(err.code) from err
 
-    entry.runtime_data = BedrockRuntimeData(client=client)
+    coordinator = None
+    if entry.data.get(CONF_COST_SENSOR_ENABLED, DEFAULT_COST_SENSOR_ENABLED):
+        coordinator = await async_acquire_cost_coordinator(hass, entry, client)
+        entry.async_on_unload(
+            partial(
+                async_release_cost_coordinator,
+                hass,
+                entry.entry_id,
+                coordinator,
+            )
+        )
+    entry.runtime_data = BedrockRuntimeData(
+        client=client,
+        cost_coordinator=coordinator,
+    )
 
     if _API_UNREGISTER not in hass.data:
         hass.data[_API_UNREGISTER] = llm.async_register_api(hass, BedrockServicesAPI(hass))

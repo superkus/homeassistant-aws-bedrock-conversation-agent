@@ -6,7 +6,7 @@
 
 A Home Assistant custom integration that uses Amazon Bedrock models as a conversation agent, so you can talk to your home and control exposed devices.
 
-The current version is 2.0.3 and requires **Home Assistant 2026.11.0 or later**. Version 2.0.0 introduced Home Assistant 2026.11 compatibility and fixed the `requires_admin` error that stopped 1.x from answering. Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
+The current version is 2.1.0 and requires **Home Assistant 2026.11.0 or later**. Version 2.0.0 introduced Home Assistant 2026.11 compatibility and fixed the `requires_admin` error that stopped 1.x from answering. Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
 
 This is a fork of [cronus42/homeassistant-aws-bedrock-conversation-agent](https://github.com/cronus42/homeassistant-aws-bedrock-conversation-agent), maintained by [superkus](https://github.com/superkus).
 
@@ -20,6 +20,7 @@ The integration's brand PNGs are derived from the Amazon Bedrock AWS Architectur
 - **Device control bounded by Home Assistant exposure settings**: the built-in **Device control** (Assist) API is the default and recommended choice. The 1.x **AWS Bedrock Services** API is still available; it supports atomic bulk actions and state reads on up to 100 exposed entities and automatically groups models that emit one call per device. Both honor **Settings → Voice assistants → Expose**; unrestricted admin and third-party APIs are not offered.
 - **Spoken confirmation for sensitive actions**: unlocking, opening doors, garages and gates, running scripts and unknown state-changing tools are held until you answer a clear "yes" from the same device within 2 minutes. See [INSTALL.md](INSTALL.md#spoken-confirmation-for-sensitive-actions) for details and limitations.
 - **Conversation memory** through Home Assistant's chat log, including turns handled by other agents (such as local intent handling) and conversations started by an announcement.
+- **Actual AWS billing cost sensor**: optionally expose signed, account-wide Amazon Bedrock month-to-date `UnblendedCost` from AWS Cost Explorer, in the currency returned by AWS. The sensor is disabled by default and requires a separate account-wide billing permission that cannot be restricted to individual resources. It refreshes every 12 hours or on request. AWS can delay or revise the value, and credits can make it negative. Billing failures never interrupt conversations. See the [installation guide](INSTALL.md#month-to-date-account-cost-sensor).
 - **Prompt caching** on models that support it, to lower cost and latency.
 - **Several agents** per set of credentials: each agent (a sub-entry) has its own model, instructions and settings.
 - **Reauthentication and reconfiguration**: change the region or credentials without removing the integration.
