@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import tomllib
+
+from PIL import Image
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,3 +101,32 @@ def test_release_rejects_untracked_files(tmp_path: Path) -> None:
     calls = call_log.read_text(encoding="utf-8").splitlines()
     assert "diff-index --quiet HEAD --" in calls, result.stderr
     assert not marker.exists(), "release reached tag creation despite an untracked file"
+
+
+def test_brand_icon_pngs_match_release_contract() -> None:
+    """Brand icons have the required PNG dimensions and reviewed bytes."""
+    brand = REPOSITORY_ROOT / "custom_components" / "bedrock_conversation" / "brand"
+    expected = {
+        "icon.png": (
+            (256, 256),
+            "effc46a856d54c2071a982d6193d74508a229c7f133e7373cb435c2a2fe0858f",
+        ),
+        "icon@2x.png": (
+            (512, 512),
+            "1a2c4610f92b6685c822f1ac4af017ab613299bd3d6a069c4ef26d628c31feff",
+        ),
+    }
+    for filename, (expected_size, expected_hash) in expected.items():
+        path = brand / filename
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
+        with Image.open(path) as image:
+            assert image.format == "PNG"
+            assert image.size == expected_size
+            image.verify()
+
+
+def test_project_metadata_references_complete_license() -> None:
+    """Published metadata references the complete license, including asset exceptions."""
+    metadata = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert metadata["project"]["license"] == {"file": "LICENSE"}

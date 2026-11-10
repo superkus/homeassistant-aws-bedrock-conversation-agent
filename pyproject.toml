@@ -1,9 +1,9 @@
 [project]
 name = "homeassistant-bedrock-conversation"
-version = "2.0.2"
+version = "2.0.3"
 description = "AWS Bedrock conversation agent for Home Assistant"
 readme = "README.md"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 # Home Assistant 2026.11 requires Python 3.14.2 or newer.
 requires-python = ">=3.14.2"
 
