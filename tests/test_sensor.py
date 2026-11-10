@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta
+from unittest.mock import patch
 
 from homeassistant import config_entries
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
@@ -22,14 +23,22 @@ from custom_components.bedrock_conversation.client import (
 from custom_components.bedrock_conversation.const import (
     CONF_AWS_REGION,
     CONF_COST_SENSOR_ENABLED,
+    CONF_COST_TAG_KEY,
+    CONF_COST_TAG_VALUE,
     COST_EXPLORER_METRIC,
     COST_EXPLORER_UPDATE_INTERVAL,
     COST_SENSOR_KEY,
+    DEFAULT_COST_TAG_KEY,
+    DEFAULT_COST_TAG_VALUE,
     DOMAIN,
     SUBENTRY_CONVERSATION,
 )
 
 from .conftest import ENTRY_DATA, MODEL, FakeBedrock
+
+AIP_MODEL = (
+    "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/home-assistant-bedrock"
+)
 
 
 async def _setup_entry(
@@ -38,6 +47,9 @@ async def _setup_entry(
     *,
     enabled: bool,
     region: str = "eu-west-3",
+    tag_key: object = DEFAULT_COST_TAG_KEY,
+    tag_value: object = DEFAULT_COST_TAG_VALUE,
+    model: str = AIP_MODEL,
 ) -> MockConfigEntry:
     for component in ("homeassistant", "conversation", "intent", "llm"):
         assert await async_setup_component(hass, component, {})
@@ -48,12 +60,14 @@ async def _setup_entry(
             **ENTRY_DATA,
             CONF_AWS_REGION: region,
             CONF_COST_SENSOR_ENABLED: enabled,
+            CONF_COST_TAG_KEY: tag_key,
+            CONF_COST_TAG_VALUE: tag_value,
         },
         version=3,
         minor_version=1,
         subentries_data=[
             ConfigSubentryData(
-                data={"model": MODEL},
+                data={"model": model},
                 subentry_type=SUBENTRY_CONVERSATION,
                 title="AWS Bedrock",
                 unique_id=None,
@@ -95,7 +109,9 @@ async def test_cost_sensor_state_and_metadata(hass: HomeAssistant, bedrock: Fake
     assert state.attributes["billing_period_end_exclusive"] == "2026-11-11"
     assert state.attributes["last_updated"] == "2026-11-10T12:00:00+00:00"
     assert state.attributes["metric"] == COST_EXPLORER_METRIC
-    assert state.attributes["scope"] == "Account-wide Amazon Bedrock, all regions"
+    assert state.attributes["cost_allocation_tag_key"] == DEFAULT_COST_TAG_KEY
+    assert state.attributes["cost_allocation_tag_value"] == DEFAULT_COST_TAG_VALUE
+    assert state.attributes["scope"] == "application_tag_all_regions"
 
     registry_entry = er.async_get(hass).async_get(entity_id)
     assert registry_entry is not None
@@ -109,6 +125,8 @@ async def test_cost_sensor_state_and_metadata(hass: HomeAssistant, bedrock: Fake
     assert bedrock.cost_calls[-1] == (
         date(today.year, today.month, 1),
         today + timedelta(days=1),
+        DEFAULT_COST_TAG_KEY,
+        DEFAULT_COST_TAG_VALUE,
     )
 
 
@@ -228,8 +246,13 @@ async def test_initial_cost_refresh_runs_in_background_and_publishes_result(
     release = asyncio.Event()
     completed = asyncio.Event()
 
-    async def gated_cost(period_start: date, period_end: date):
-        bedrock.cost_calls.append((period_start, period_end))
+    async def gated_cost(
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
+    ):
+        bedrock.cost_calls.append((period_start, period_end, tag_key, tag_value))
         started.set()
         try:
             await release.wait()
@@ -269,8 +292,13 @@ async def test_unload_cancels_blocked_initial_cost_refresh(
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def blocked_cost(period_start: date, period_end: date):
-        bedrock.cost_calls.append((period_start, period_end))
+    async def blocked_cost(
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
+    ):
+        bedrock.cost_calls.append((period_start, period_end, tag_key, tag_value))
         started.set()
         try:
             await asyncio.Event().wait()
@@ -319,18 +347,23 @@ async def test_billing_auth_failure_starts_reauth_without_unloading_conversation
     )
 
 
-async def test_same_key_across_regions_shares_startup_and_scheduled_cost_request(
+async def test_same_key_and_tag_across_regions_share_cost_request(
     hass: HomeAssistant, bedrock: FakeBedrock
 ) -> None:
-    """Account-wide billing is fetched once for entries sharing an access key."""
+    """One application tag is fetched once for entries sharing an access key."""
     started = asyncio.Event()
     release = asyncio.Event()
     all_completed = asyncio.Event()
     completed_count = 0
 
-    async def gated_cost(period_start: date, period_end: date):
+    async def gated_cost(
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
+    ):
         nonlocal completed_count
-        bedrock.cost_calls.append((period_start, period_end))
+        bedrock.cost_calls.append((period_start, period_end, tag_key, tag_value))
         started.set()
         try:
             await release.wait()
@@ -366,3 +399,129 @@ async def test_same_key_across_regions_shares_startup_and_scheduled_cost_request
     await hass.async_block_till_done()
 
     assert (startup_calls, len(bedrock.cost_calls)) == (1, 1)
+
+
+async def test_different_application_tags_do_not_share_cost_request(
+    hass: HomeAssistant, bedrock: FakeBedrock
+) -> None:
+    """Different application filters stay isolated even with one access key."""
+    first = await _setup_entry(
+        hass, bedrock, enabled=True, tag_value="HomeAssistantBedrockConversation"
+    )
+    second = await _setup_entry(hass, bedrock, enabled=True, tag_value="AnotherApplication")
+    first_coordinator = first.runtime_data.cost_coordinator
+    second_coordinator = second.runtime_data.cost_coordinator
+    assert first_coordinator is not None
+    assert second_coordinator is not None
+    assert first_coordinator is not second_coordinator
+
+    await first_coordinator.async_refresh()
+    await second_coordinator.async_refresh()
+
+    assert bedrock.cost_calls[-2][2:] == (
+        DEFAULT_COST_TAG_KEY,
+        "HomeAssistantBedrockConversation",
+    )
+    assert bedrock.cost_calls[-1][2:] == (
+        DEFAULT_COST_TAG_KEY,
+        "AnotherApplication",
+    )
+
+
+async def test_different_cost_coordinators_serialize_provider_requests(
+    hass: HomeAssistant, bedrock: FakeBedrock
+) -> None:
+    """Cost Explorer requests share one slot across isolated coordinators."""
+    first = await _setup_entry(
+        hass, bedrock, enabled=True, tag_value="HomeAssistantBedrockConversation"
+    )
+    second = await _setup_entry(hass, bedrock, enabled=True, tag_value="AnotherApplication")
+    first_coordinator = first.runtime_data.cost_coordinator
+    second_coordinator = second.runtime_data.cost_coordinator
+    assert first_coordinator is not None
+    assert second_coordinator is not None
+    assert first_coordinator is not second_coordinator
+
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+    active_requests = 0
+    peak_active_requests = 0
+
+    async def gated_cost(
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
+    ):
+        nonlocal active_requests, peak_active_requests
+        bedrock.cost_calls.append((period_start, period_end, tag_key, tag_value))
+        active_requests += 1
+        peak_active_requests = max(peak_active_requests, active_requests)
+        first_started.set()
+        try:
+            await release.wait()
+            return bedrock.cost_data
+        finally:
+            active_requests -= 1
+
+    bedrock.get_cost = gated_cost
+    bedrock.cost_calls.clear()
+    first_refresh = asyncio.create_task(first_coordinator.async_refresh())
+    async with asyncio.timeout(1):
+        await first_started.wait()
+    second_refresh = asyncio.create_task(second_coordinator.async_refresh())
+    await asyncio.sleep(0)
+
+    assert len(bedrock.cost_calls) == 1
+    release.set()
+    await asyncio.gather(first_refresh, second_refresh)
+
+    assert len(bedrock.cost_calls) == 2
+    assert peak_active_requests == 1
+
+
+async def test_enabled_sensor_requires_application_profiles_at_runtime(
+    hass: HomeAssistant, bedrock: FakeBedrock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Legacy configurations without tags cannot silently omit HA usage."""
+    entry = await _setup_entry(hass, bedrock, enabled=True, model=MODEL)
+    assert entry.runtime_data.cost_coordinator is None
+    assert _sensor_id(hass, entry) is None
+    assert "every agent must use an application inference profile ARN" in caplog.text
+    assert bedrock.cost_calls == []
+
+
+@pytest.mark.parametrize(
+    ("tag_key", "tag_value"),
+    [
+        pytest.param(["Application"], DEFAULT_COST_TAG_VALUE, id="unhashable-key"),
+        pytest.param(DEFAULT_COST_TAG_KEY, ["HomeAssistant"], id="unhashable-value"),
+        pytest.param("", DEFAULT_COST_TAG_VALUE, id="empty-key"),
+        pytest.param("aws:Reserved", DEFAULT_COST_TAG_VALUE, id="reserved-key"),
+        pytest.param("Application\x7f", DEFAULT_COST_TAG_VALUE, id="del-in-key"),
+        pytest.param(DEFAULT_COST_TAG_KEY, "HomeAssistant\x80", id="c1-in-value"),
+    ],
+)
+async def test_malformed_stored_cost_tags_omit_sensor_without_billing_query(
+    hass: HomeAssistant,
+    bedrock: FakeBedrock,
+    tag_key: object,
+    tag_value: object,
+) -> None:
+    """Malformed manually stored tags cannot crash setup or broaden the cost query."""
+    with patch(
+        "custom_components.bedrock_conversation.is_application_inference_profile_arn",
+        return_value=True,
+    ):
+        entry = await _setup_entry(
+            hass,
+            bedrock,
+            enabled=True,
+            tag_key=tag_key,
+            tag_value=tag_value,
+        )
+
+    assert entry.state.name == "LOADED"
+    assert entry.runtime_data.cost_coordinator is None
+    assert _sensor_id(hass, entry) is None
+    assert bedrock.cost_calls == []

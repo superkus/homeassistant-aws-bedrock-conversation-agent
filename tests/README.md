@@ -22,7 +22,7 @@ make test                                   # from the repo root: .venv + covera
 | `test_llm_api.py` | `HassCallService` and `HassGetState` single/bulk target validation, atomic exposure checks, and the device list as delimited data |
 | `test_messages.py` | Chat log → Converse messages (foreign tool calls, missing results, conversations starting with the assistant), tool schemas and names, cache points |
 | `test_release.py` | Rejection of untracked release trees, brand PNG hashes, format, and dimensions, and project metadata's reference to the complete `LICENSE` file |
-| `test_sensor.py` | Opt-in Cost Explorer monetary sensor, billing metadata, UTC month period, manual refresh, failure isolation and disabled default |
+| `test_sensor.py` | Opt-in application-tag-filtered Cost Explorer monetary sensor, billing metadata, UTC month period, manual refresh, shared-filter coordination, failure isolation and application-profile requirement |
 | `test_utils.py` | `closest_color` |
 
 Coverage is printed in the terminal (`--cov-report=term-missing`).

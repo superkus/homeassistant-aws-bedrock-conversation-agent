@@ -6,6 +6,7 @@ from datetime import timedelta
 import logging
 import re
 from typing import Final
+import unicodedata
 
 from homeassistant.const import (
     CONF_LLM_HASS_API as CONF_LLM_HASS_API,  # re-exported
@@ -51,6 +52,8 @@ CONF_TEMPERATURE: Final = "temperature"
 CONF_MAX_TOOL_CALL_ITERATIONS: Final = "max_tool_call_iterations"
 CONF_PROMPT_CACHING: Final = "prompt_caching"
 CONF_COST_SENSOR_ENABLED: Final = "cost_sensor_enabled"
+CONF_COST_TAG_KEY: Final = "cost_allocation_tag_key"
+CONF_COST_TAG_VALUE: Final = "cost_allocation_tag_value"
 CONF_CONFIRM_SENSITIVE_ACTIONS: Final = "confirm_sensitive_actions"
 CONF_EXTRA_ATTRIBUTES_TO_EXPOSE: Final = "extra_attributes_to_expose"
 
@@ -79,9 +82,39 @@ DEFAULT_TEMPERATURE: Final = 0.5
 DEFAULT_MAX_TOOL_CALL_ITERATIONS: Final = 10
 DEFAULT_PROMPT_CACHING: Final = True
 DEFAULT_COST_SENSOR_ENABLED: Final = False
+DEFAULT_COST_TAG_KEY: Final = "Application"
+DEFAULT_COST_TAG_VALUE: Final = "HomeAssistantBedrockConversation"
 DEFAULT_CONFIRM_SENSITIVE_ACTIONS: Final = True
 
-# AWS Cost Explorer account-cost sensor
+# AWS cost-allocation tag constraints define these maximum lengths.
+_COST_TAG_KEY_MAX_LENGTH: Final = 128
+_COST_TAG_VALUE_MAX_LENGTH: Final = 256
+
+
+def _normalize_cost_tag(value: object, maximum_length: int) -> str:
+    """Return a normalized Cost Explorer tag or raise ``ValueError``."""
+    if not isinstance(value, str) or any(unicodedata.category(char) == "Cc" for char in value):
+        raise ValueError
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum_length:
+        raise ValueError
+    return normalized
+
+
+def normalize_cost_tag_key(value: object) -> str:
+    """Return a normalized Cost Explorer tag key or raise ``ValueError``."""
+    normalized = _normalize_cost_tag(value, _COST_TAG_KEY_MAX_LENGTH)
+    if normalized.lower().startswith("aws:"):
+        raise ValueError
+    return normalized
+
+
+def normalize_cost_tag_value(value: object) -> str:
+    """Return a normalized Cost Explorer tag value or raise ``ValueError``."""
+    return _normalize_cost_tag(value, _COST_TAG_VALUE_MAX_LENGTH)
+
+
+# AWS Cost Explorer application-tag-filtered cost sensor
 COST_EXPLORER_UPDATE_INTERVAL: Final = timedelta(hours=12)
 COST_EXPLORER_METRIC: Final = "UnblendedCost"
 COST_EXPLORER_SERVICE: Final = "Amazon Bedrock"
@@ -218,3 +251,34 @@ AFFIRMATIVE_FILLERS: Final = frozenset({"ok", "okay"})
 # "ja ja ja" is laughter, not a German yes.
 AFFIRMATIVE_NOT_REPEATABLE: Final = frozenset({"ja"})
 # fmt: on
+
+
+_APPLICATION_INFERENCE_PROFILE_ARN_RE = re.compile(
+    r"arn:(?P<partition>aws|aws-us-gov|aws-cn|aws-iso|aws-iso-b):"
+    r"bedrock:(?P<region>[a-z]{2}(?:-[a-z0-9]+){1,2}-[1-9][0-9]*):"
+    r"(?P<account>[0-9]{12}):"
+    r"application-inference-profile/(?P<profile>[a-zA-Z0-9-:.]+)"
+)
+_BEDROCK_ARN_MAX_LENGTH = 2048
+_PARTITION_REGION_PREFIXES = {
+    "aws-cn": ("cn-",),
+    "aws-us-gov": ("us-gov-",),
+    "aws-iso": ("us-iso-",),
+    "aws-iso-b": ("us-isob-",),
+}
+_RESERVED_STANDARD_REGION_PREFIXES = ("cn-", "us-gov-", "us-iso-", "us-isob-")
+
+
+def is_application_inference_profile_arn(model_id: object) -> bool:
+    """Return whether a model ID is a valid account-owned profile ARN."""
+    if (
+        not isinstance(model_id, str)
+        or len(model_id) > _BEDROCK_ARN_MAX_LENGTH
+        or (match := _APPLICATION_INFERENCE_PROFILE_ARN_RE.fullmatch(model_id)) is None
+    ):
+        return False
+    partition = match.group("partition")
+    region = match.group("region")
+    if partition == "aws":
+        return not region.startswith(_RESERVED_STANDARD_REGION_PREFIXES)
+    return region.startswith(_PARTITION_REGION_PREFIXES[partition])

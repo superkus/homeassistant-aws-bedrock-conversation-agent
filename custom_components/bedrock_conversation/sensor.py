@@ -1,4 +1,4 @@
-"""Sensor platform for actual Amazon Bedrock account cost."""
+"""Sensor platform for actual application-tagged Amazon Bedrock cost."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     COST_EXPLORER_METRIC,
-    COST_EXPLORER_SERVICE,
     COST_SENSOR_KEY,
     DOMAIN,
 )
@@ -33,6 +32,9 @@ _ATTR_PERIOD_END = "billing_period_end_exclusive"
 _ATTR_LAST_UPDATED = "last_updated"
 _ATTR_METRIC = "metric"
 _ATTR_SCOPE = "scope"
+_ATTR_TAG_KEY = "cost_allocation_tag_key"
+_ATTR_TAG_VALUE = "cost_allocation_tag_value"
+_SCOPE_APPLICATION_TAG_ALL_REGIONS = "application_tag_all_regions"
 
 
 async def async_setup_entry(
@@ -40,7 +42,7 @@ async def async_setup_entry(
     entry: BedrockConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the optional account-cost sensor."""
+    """Set up the optional application-tag-filtered cost sensor."""
     coordinator = entry.runtime_data.cost_coordinator
     if coordinator is None:
         return
@@ -51,7 +53,7 @@ async def async_setup_entry(
 
 
 class BedrockMonthToDateCostSensor(CoordinatorEntity[BedrockCostCoordinator], SensorEntity):
-    """Actual account-wide Amazon Bedrock cost for the current UTC month."""
+    """Actual application-tagged Bedrock cost for the current UTC month."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "month_to_date_account_cost"
@@ -67,6 +69,8 @@ class BedrockMonthToDateCostSensor(CoordinatorEntity[BedrockCostCoordinator], Se
     ) -> None:
         """Initialise the sensor on an entry-level service device."""
         super().__init__(coordinator)
+        # Keep the 2.1.0 unique ID stable after changing the displayed
+        # sensor's scope to an application tag.
         self._attr_unique_id = f"{entry.entry_id}_{COST_SENSOR_KEY}"
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -119,5 +123,7 @@ class BedrockMonthToDateCostSensor(CoordinatorEntity[BedrockCostCoordinator], Se
             _ATTR_PERIOD_END: data.period_end.isoformat(),
             _ATTR_LAST_UPDATED: data.retrieved_at.isoformat(),
             _ATTR_METRIC: COST_EXPLORER_METRIC,
-            _ATTR_SCOPE: f"Account-wide {COST_EXPLORER_SERVICE}, all regions",
+            _ATTR_TAG_KEY: self.coordinator.tag_key,
+            _ATTR_TAG_VALUE: self.coordinator.tag_value,
+            _ATTR_SCOPE: _SCOPE_APPLICATION_TAG_ALL_REGIONS,
         }

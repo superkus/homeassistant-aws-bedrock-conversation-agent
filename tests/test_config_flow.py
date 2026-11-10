@@ -21,6 +21,9 @@ from custom_components.bedrock_conversation.client import (
     BedrockClient,
     BedrockConnectionError,
 )
+from custom_components.bedrock_conversation.config_flow import (
+    BedrockConversationConfigFlow,
+)
 from custom_components.bedrock_conversation.const import (
     CONF_AWS_ACCESS_KEY_ID,
     CONF_AWS_REGION,
@@ -28,6 +31,8 @@ from custom_components.bedrock_conversation.const import (
     CONF_AWS_SESSION_TOKEN,
     CONF_CONFIRM_SENSITIVE_ACTIONS,
     CONF_COST_SENSOR_ENABLED,
+    CONF_COST_TAG_KEY,
+    CONF_COST_TAG_VALUE,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
@@ -35,9 +40,12 @@ from custom_components.bedrock_conversation.const import (
     CONF_PROMPT,
     CONF_PROMPT_CACHING,
     CONF_TEMPERATURE,
+    DEFAULT_COST_TAG_KEY,
+    DEFAULT_COST_TAG_VALUE,
     DEFAULT_PROMPT,
     DOMAIN,
     HOME_LLM_API_ID,
+    is_application_inference_profile_arn,
 )
 
 from .conftest import ENTRY_DATA, MODEL, FakeBedrock
@@ -47,6 +55,17 @@ CREDENTIALS = {
     CONF_AWS_ACCESS_KEY_ID: "AKIATEST",
     CONF_AWS_SECRET_ACCESS_KEY: "test-secret",
 }
+AIP_MODEL = (
+    "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/home-assistant-bedrock"
+)
+
+
+async def _set_application_profile(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    agent = next(iter(entry.subentries.values()))
+    hass.config_entries.async_update_subentry(
+        entry, agent, data={**agent.data, CONF_MODEL_ID: AIP_MODEL}
+    )
+    await hass.async_block_till_done()
 
 
 @pytest.fixture(autouse=True)
@@ -473,6 +492,7 @@ async def test_reconfigure_enables_entry_level_cost_sensor(
     hass: HomeAssistant, config_entry: MockConfigEntry, bedrock: FakeBedrock
 ) -> None:
     """Cost Explorer is an opt-in credential-entry setting, not an agent option."""
+    await _set_application_profile(hass, config_entry)
     result = await config_entry.start_reconfigure_flow(hass)
     assert CONF_COST_SENSOR_ENABLED in result["data_schema"].schema
     marker = next(
@@ -489,6 +509,8 @@ async def test_reconfigure_enables_entry_level_cost_sensor(
     await hass.async_block_till_done()
 
     assert config_entry.data[CONF_COST_SENSOR_ENABLED] is True
+    assert config_entry.data[CONF_COST_TAG_KEY] == DEFAULT_COST_TAG_KEY
+    assert config_entry.data[CONF_COST_TAG_VALUE] == DEFAULT_COST_TAG_VALUE
     assert config_entry.runtime_data.cost_coordinator is not None
     assert all(
         CONF_COST_SENSOR_ENABLED not in agent.data for agent in config_entry.subentries.values()
@@ -523,6 +545,7 @@ async def test_failed_reconfigure_preserves_submitted_cost_sensor_choice(
     submitted_enabled: bool,
 ) -> None:
     """A credential error keeps the submitted billing opt-in on the retry form."""
+    await _set_application_profile(hass, config_entry)
     hass.config_entries.async_update_entry(
         config_entry,
         data={**config_entry.data, CONF_COST_SENSOR_ENABLED: initially_enabled},
@@ -544,3 +567,327 @@ async def test_failed_reconfigure_preserves_submitted_cost_sensor_choice(
     for secret_name in (CONF_AWS_SECRET_ACCESS_KEY, CONF_AWS_SESSION_TOKEN):
         secret_marker = next(field for field in schema if field == secret_name)
         assert secret_marker.default is probatio.UNDEFINED
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (CONF_COST_TAG_KEY, ""),
+        (CONF_COST_TAG_KEY, "aws:Reserved"),
+        (CONF_COST_TAG_KEY, "k" * 129),
+        (CONF_COST_TAG_VALUE, ""),
+        (CONF_COST_TAG_VALUE, "v" * 257),
+        (CONF_COST_TAG_VALUE, "line\nbreak"),
+    ],
+)
+async def test_cost_sensor_requires_valid_application_tag(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+    field: str,
+    value: str,
+) -> None:
+    """An enabled sensor always requires an application tag filter."""
+    await _set_application_profile(hass, config_entry)
+    result = await config_entry.start_reconfigure_flow(hass)
+    user_input = {
+        **CREDENTIALS,
+        CONF_COST_SENSOR_ENABLED: True,
+        CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+        CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        field: value,
+    }
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {field: "invalid_cost_tag"}
+    # Failed validation keeps the entered toggle and the other tag field.
+    enabled_marker = next(
+        marker for marker in result["data_schema"].schema if marker == CONF_COST_SENSOR_ENABLED
+    )
+    assert enabled_marker.default() is True
+
+
+async def test_cost_sensor_requires_all_agents_to_use_application_profiles(
+    hass: HomeAssistant, config_entry: MockConfigEntry, bedrock: FakeBedrock
+) -> None:
+    """The app-filtered sensor cannot be enabled while an agent is untagged."""
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            **CREDENTIALS,
+            CONF_COST_SENSOR_ENABLED: True,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cost_requires_application_profiles"}
+    assert CONF_COST_SENSOR_ENABLED not in config_entry.data
+
+
+async def test_agent_model_must_remain_application_profile_while_cost_enabled(
+    hass: HomeAssistant, config_entry: MockConfigEntry, bedrock: FakeBedrock
+) -> None:
+    """Adding or changing an agent cannot create untagged Bedrock spend."""
+    await _set_application_profile(hass, config_entry)
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            **CREDENTIALS,
+            CONF_COST_SENSOR_ENABLED: True,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    assert result["type"] is FlowResultType.ABORT
+    await hass.async_block_till_done()
+
+    agent = next(iter(config_entry.subentries.values()))
+    result = await config_entry.start_subentry_reconfigure_flow(hass, agent.subentry_id)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {**AGENT_FORM, CONF_MODEL_ID: MODEL}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_MODEL_ID: "application_profile_required"}
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {**AGENT_FORM, CONF_MODEL_ID: AIP_MODEL}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/Profile-1:prod.v2",
+        "arn:aws-us-gov:bedrock:us-gov-west-1:123456789012:application-inference-profile/Profile-1",
+        "arn:aws-cn:bedrock:cn-north-1:123456789012:application-inference-profile/Profile-1",
+        "arn:aws-iso:bedrock:us-iso-east-1:123456789012:application-inference-profile/Profile-1",
+        "arn:aws-iso-b:bedrock:us-isob-east-1:123456789012:application-inference-profile/Profile-1",
+    ],
+)
+def test_accepts_canonical_application_inference_profile_arns(model_id: str) -> None:
+    """Every Bedrock partition accepts its canonical account-owned profile ARN."""
+    assert is_application_inference_profile_arn(model_id)
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "eu.anthropic.claude-opus-5-5",
+        "arn:aws:bedrock:eu-west-3:123456789012:inference-profile/eu.claude",
+        "arn:aws-invalid:bedrock:eu-west-3:123456789012:inference-profile/x",
+        "arn:aws:bedrock::123456789012:inference-profile/x",
+        "arn:aws:bedrock:EU_WEST_3:123456789012:inference-profile/x",
+        "arn:aws-invalid:bedrock:eu-west-3:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock::123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:EU_WEST_3:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:-:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:123:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:us--east-1:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:cn-north-1:123456789012:application-inference-profile/x",
+        "arn:aws-cn:bedrock:us-east-1:123456789012:application-inference-profile/x",
+        "arn:aws-us-gov:bedrock:us-east-1:123456789012:application-inference-profile/x",
+        "arn:aws-iso:bedrock:us-isob-east-1:123456789012:application-inference-profile/x",
+        "arn:aws:bedrock:eu-west-3:123:application-inference-profile/x",
+        "arn:aws:bedrock:eu-west-3:123456789012:foundation-model/x",
+        "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/",
+        "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/bad_id",
+        None,
+    ],
+)
+def test_rejects_noncanonical_application_inference_profile_arns(model_id: object) -> None:
+    """Malformed or non-account-owned model identifiers never qualify for cost tracking."""
+    assert not is_application_inference_profile_arn(model_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param(CONF_COST_TAG_KEY, 123, id="non-string-key"),
+        pytest.param(CONF_COST_TAG_VALUE, ["value"], id="non-string-value"),
+        pytest.param(CONF_COST_TAG_KEY, "key\x7f", id="del-in-key"),
+        pytest.param(CONF_COST_TAG_VALUE, "value\x7f", id="del-in-value"),
+        pytest.param(CONF_COST_TAG_KEY, "key\x80", id="c1-start-in-key"),
+        pytest.param(CONF_COST_TAG_VALUE, "value\x80", id="c1-start-in-value"),
+        pytest.param(CONF_COST_TAG_KEY, "key\x9f", id="c1-end-in-key"),
+        pytest.param(CONF_COST_TAG_VALUE, "value\x9f", id="c1-end-in-value"),
+    ],
+)
+async def test_reconfigure_rejects_malformed_cost_tags_without_coercion(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+    field: str,
+    value: object,
+) -> None:
+    """Form tags must be strings without DEL or C1 control characters."""
+    flow = BedrockConversationConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "entry_id": config_entry.entry_id,
+        "source": config_entries.SOURCE_RECONFIGURE,
+    }
+    user_input = {
+        **CREDENTIALS,
+        CONF_COST_SENSOR_ENABLED: True,
+        CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+        CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        field: value,
+    }
+    with patch(
+        "custom_components.bedrock_conversation.config_flow.is_application_inference_profile_arn",
+        return_value=True,
+    ):
+        result = await flow.async_step_reconfigure(user_input)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {field: "invalid_cost_tag"}
+    assert CONF_COST_SENSOR_ENABLED not in config_entry.data
+
+
+async def test_invalid_tag_retry_retains_non_secret_fields_only(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+) -> None:
+    """A tag error preserves retryable fields but clears submitted secrets."""
+    result = await config_entry.start_reconfigure_flow(hass)
+    submitted = {
+        **CREDENTIALS,
+        CONF_AWS_REGION: "us-east-1",
+        CONF_AWS_ACCESS_KEY_ID: "AKIARETRY",
+        CONF_AWS_SECRET_ACCESS_KEY: "new-secret",
+        CONF_AWS_SESSION_TOKEN: "temporary-token",
+        CONF_COST_SENSOR_ENABLED: True,
+        CONF_COST_TAG_KEY: "",
+        CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+    }
+    with patch(
+        "custom_components.bedrock_conversation.config_flow.is_application_inference_profile_arn",
+        return_value=True,
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], submitted)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_COST_TAG_KEY: "invalid_cost_tag"}
+    schema = result["data_schema"].schema
+    region_marker = next(marker for marker in schema if marker == CONF_AWS_REGION)
+    access_key_marker = next(marker for marker in schema if marker == CONF_AWS_ACCESS_KEY_ID)
+    assert region_marker.default() == "us-east-1"
+    assert access_key_marker.default() == "AKIARETRY"
+    for secret_name in (CONF_AWS_SECRET_ACCESS_KEY, CONF_AWS_SESSION_TOKEN):
+        secret_marker = next(marker for marker in schema if marker == secret_name)
+        assert secret_marker.default is probatio.UNDEFINED
+
+
+async def test_region_change_enabling_cost_rejects_base_model(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+) -> None:
+    """Enabling cost tracking during a region change requires the replacement profile."""
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            **CREDENTIALS,
+            CONF_AWS_REGION: "us-east-1",
+            CONF_COST_SENSOR_ENABLED: True,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_model"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL_ID: "amazon.nova-lite-v1:0"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_MODEL_ID: "application_profile_required"}
+
+
+async def test_region_change_enabling_cost_accepts_application_profile(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+) -> None:
+    """Enabling cost tracking accepts a replacement application profile."""
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            **CREDENTIALS,
+            CONF_AWS_REGION: "us-east-1",
+            CONF_COST_SENSOR_ENABLED: True,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_model"
+
+    replacement = (
+        "arn:aws:bedrock:us-east-1:123456789012:"
+        "application-inference-profile/home-assistant-bedrock"
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL_ID: replacement}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.data[CONF_COST_SENSOR_ENABLED] is True
+    assert next(iter(config_entry.subentries.values())).data[CONF_MODEL_ID] == replacement
+
+
+async def test_region_change_disabling_cost_accepts_base_model(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+) -> None:
+    """Disabling cost tracking permits a replacement base model in the new region."""
+    await _set_application_profile(hass, config_entry)
+    hass.config_entries.async_update_entry(
+        config_entry,
+        data={
+            **config_entry.data,
+            CONF_COST_SENSOR_ENABLED: True,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    await hass.async_block_till_done()
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            **CREDENTIALS,
+            CONF_AWS_REGION: "us-east-1",
+            CONF_COST_SENSOR_ENABLED: False,
+            CONF_COST_TAG_KEY: DEFAULT_COST_TAG_KEY,
+            CONF_COST_TAG_VALUE: DEFAULT_COST_TAG_VALUE,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_model"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL_ID: "amazon.nova-lite-v1:0"}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.data[CONF_COST_SENSOR_ENABLED] is False
+    assert (
+        next(iter(config_entry.subentries.values())).data[CONF_MODEL_ID] == "amazon.nova-lite-v1:0"
+    )

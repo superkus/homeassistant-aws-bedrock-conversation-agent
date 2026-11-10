@@ -67,11 +67,13 @@ The 1.x `media_player.play_media` service is no longer offered by this API. Medi
 
 Other conversation agents using this API are refused `lock.unlock`, opening door/garage/gate covers, `script.turn_on` and scenes that set a lock or such a cover, because only this integration's agent can ask for confirmation.
 
-## Month-to-date account cost
+## Month-to-date application cost
 
-Version 2.1.0 adds a default-off, entry-level monetary sensor backed by AWS Cost Explorer. Enabling it requires a separate, optional IAM statement allowing `ce:GetCostAndUsage` on `Resource: "*"`; the action exposes account-wide billing data and does not support resource-level restrictions. Use the integration entry's **Reconfigure** menu to enable it. The sensor reports signed, account-wide Amazon Bedrock `UnblendedCost` across all regions for the current UTC month, in AWS's returned currency. It refreshes every 12 hours and supports manual entity refresh. Billing data is delayed and may be revised; adjustments, refunds and credits can reduce the value or make it negative. Cost failures make only the sensor unavailable and do not affect conversations.
+Version 2.1.1 makes the default-off Cost Explorer monetary sensor application-tag-filtered. Create one application inference profile per model used by Home Assistant, tag every profile with an activated cost-allocation tag (default `Application=HomeAssistantBedrockConversation`), and configure each agent with its profile ARN. Then add `ce:GetCostAndUsage` and enable the sensor through entry-level **Reconfigure**.
 
-Each enabled entry has its own sensor entity. Entries sharing an access-key ID share one coordinator and AWS request, but the integration cannot deduplicate different access-key IDs belonging to the same account without another permission. Enable one billing view per AWS account or treat those sensors as duplicates, and never sum duplicate account-wide totals. Home Assistant generates the entity ID, so confirm it in Home Assistant before using it in automations. See the [installation guide](https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent/blob/main/INSTALL.md#month-to-date-account-cost-sensor) for the IAM statement and details.
+Dedicated application inference profiles make each model's usage taggable. The query filters signed `UnblendedCost` across all regions only by `SERVICE=Amazon Bedrock` and the configured tag key/value; it does not filter by profile ARN. Only Bedrock usage with the exact configured tag key/value is included; usage with a different or missing tag is excluded. The sensor refreshes every 12 hours and supports manual refresh. AWS billing data is delayed, non-retroactive and may be revised. Cost failures make only the sensor unavailable and do not affect conversations. Every agent must keep using a tagged application profile while tracking is enabled.
+
+Entries sharing an access-key ID and tag filter share one coordinator and AWS request. Home Assistant generates the entity ID, so confirm it before using it in automations. See the [installation guide](https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent/blob/main/INSTALL.md#month-to-date-application-cost-sensor).
 
 ## Upgrading from 1.x
 
