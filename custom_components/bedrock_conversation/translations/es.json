@@ -44,12 +44,16 @@
           "aws_access_key_id": "ID de clave de acceso",
           "aws_secret_access_key": "Clave de acceso secreta",
           "aws_session_token": "Token de sesión (solo credenciales temporales)",
-          "cost_sensor_enabled": "Activar el sensor de coste mensual de Amazon Bedrock"
+          "cost_sensor_enabled": "Activar el sensor de coste mensual de esta aplicación Bedrock",
+          "cost_allocation_tag_key": "Clave de etiqueta de asignación de costes",
+          "cost_allocation_tag_value": "Valor de etiqueta de asignación de costes"
         },
         "description": "Cambia la región o las credenciales. Si cambias la región, el siguiente paso muestra metadatos de modelos y perfiles de inferencia de la nueva región; si no, cada agente conserva su modelo.",
         "data_description": {
           "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas.",
-          "cost_sensor_enabled": "Consulta AWS Cost Explorer cada 12 horas para obtener el UnblendedCost real de Amazon Bedrock en toda la cuenta y todas las regiones. Requiere ce:GetCostAndUsage. Los datos de facturación llegan con retraso y AWS puede revisarlos."
+          "cost_sensor_enabled": "Consulta AWS Cost Explorer cada 12 horas para obtener el UnblendedCost real de Amazon Bedrock que coincide con la etiqueta obligatoria de esta aplicación en todas las regiones. Requiere ce:GetCostAndUsage. Los datos llegan con retraso, no son retroactivos y AWS puede revisarlos.",
+          "cost_allocation_tag_key": "Etiqueta de asignación de costes activada y añadida a cada perfil de inferencia de aplicación que use esta integración. Valor predeterminado: Application.",
+          "cost_allocation_tag_value": "Valor que identifica esta aplicación. Valor predeterminado: HomeAssistantBedrockConversation."
         }
       },
       "reconfigure_model": {
@@ -65,7 +69,10 @@
       "access_denied": "AWS ha aceptado estas credenciales, pero no se han podido listar los metadatos de los modelos. Concede bedrock:ListFoundationModels y bedrock:ListInferenceProfiles. La invocación se comprueba después y requiere bedrock:InvokeModelWithResponseStream.",
       "cannot_connect": "No se ha podido conectar con AWS. Revisa la conexión de red.",
       "unknown": "Error inesperado. Revisa los registros.",
-      "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia."
+      "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia.",
+      "invalid_cost_tag": "Introduce una clave de etiqueta no vacía (máximo 128 caracteres y sin empezar por aws:) y un valor no vacío (máximo 256 caracteres).",
+      "cost_requires_application_profiles": "Cada agente debe usar el ARN de un perfil de inferencia de aplicación antes de activar el seguimiento del coste de esta aplicación.",
+      "application_profile_required": "El seguimiento de costes está activado. Selecciona el ARN de un perfil de inferencia de aplicación etiquetado para esta aplicación."
     },
     "abort": {
       "already_configured": "Estas credenciales ya están configuradas para esta región.",
@@ -148,7 +155,8 @@
         }
       },
       "error": {
-        "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia."
+        "no_models": "No se han podido listar modelos en esta región. Aun así puedes escribir el ID de un modelo o perfil de inferencia.",
+        "application_profile_required": "El seguimiento de costes está activado. Selecciona el ARN de un perfil de inferencia de aplicación etiquetado para esta aplicación."
       },
       "abort": {
         "entry_not_loaded": "La integración no está cargada. Revisa primero las credenciales.",
@@ -159,7 +167,7 @@
   "entity": {
     "sensor": {
       "month_to_date_account_cost": {
-        "name": "Coste de la cuenta en lo que va de mes",
+        "name": "Coste de esta aplicación en lo que va de mes",
         "state_attributes": {
           "estimated": {
             "name": "Estimado por AWS"
@@ -177,7 +185,16 @@
             "name": "Métrica de coste"
           },
           "scope": {
-            "name": "Ámbito"
+            "name": "Ámbito filtrado",
+            "state": {
+              "application_tag_all_regions": "Amazon Bedrock con etiqueta de aplicación, todas las regiones"
+            }
+          },
+          "cost_allocation_tag_key": {
+            "name": "Clave de etiqueta de costes"
+          },
+          "cost_allocation_tag_value": {
+            "name": "Valor de etiqueta de costes"
           }
         }
       }

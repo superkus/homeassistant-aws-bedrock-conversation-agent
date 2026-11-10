@@ -56,6 +56,8 @@ from .const import (
     CONF_AWS_SESSION_TOKEN,
     CONF_CONFIRM_SENSITIVE_ACTIONS,
     CONF_COST_SENSOR_ENABLED,
+    CONF_COST_TAG_KEY,
+    CONF_COST_TAG_VALUE,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
@@ -67,6 +69,8 @@ from .const import (
     DEFAULT_AWS_REGION,
     DEFAULT_CONFIRM_SENSITIVE_ACTIONS,
     DEFAULT_COST_SENSOR_ENABLED,
+    DEFAULT_COST_TAG_KEY,
+    DEFAULT_COST_TAG_VALUE,
     DEFAULT_LLM_HASS_API,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALL_ITERATIONS,
@@ -79,7 +83,10 @@ from .const import (
     LOGGER,
     SUBENTRY_CONVERSATION,
     default_title,
+    is_application_inference_profile_arn,
     is_default_title,
+    normalize_cost_tag_key,
+    normalize_cost_tag_value,
 )
 
 _PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
@@ -194,6 +201,26 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
         regions = await self.hass.async_add_executor_job(get_bedrock_regions)
         return regions or {DEFAULT_AWS_REGION: DEFAULT_AWS_REGION}
 
+    def _normalize_and_validate_cost_settings(self, user_input: dict[str, Any]) -> dict[str, str]:
+        """Normalize cost settings and return field errors."""
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+        if user_input.get(CONF_AWS_REGION) == entry.data.get(CONF_AWS_REGION) and any(
+            subentry.subentry_type == SUBENTRY_CONVERSATION
+            and not is_application_inference_profile_arn(subentry.data.get(CONF_MODEL_ID))
+            for subentry in entry.subentries.values()
+        ):
+            errors["base"] = "cost_requires_application_profiles"
+        for field, normalize in (
+            (CONF_COST_TAG_KEY, normalize_cost_tag_key),
+            (CONF_COST_TAG_VALUE, normalize_cost_tag_value),
+        ):
+            try:
+                user_input[field] = normalize(user_input.get(field, ""))
+            except ValueError:
+                errors[field] = "invalid_cost_tag"
+        return errors
+
     async def _async_region_and_credentials(
         self, step_id: str, user_input: dict[str, Any] | None, defaults: Mapping[str, Any]
     ) -> ConfigFlowResult | None:
@@ -201,16 +228,26 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             self._abort_if_duplicate(user_input, step_id)
-            if not (error := await _async_validate(self.hass, user_input)):
+            if step_id == "reconfigure" and user_input.get(CONF_COST_SENSOR_ENABLED):
+                errors = self._normalize_and_validate_cost_settings(user_input)
+            if not errors and not (error := await _async_validate(self.hass, user_input)):
                 self._data = {CONF_AWS_SESSION_TOKEN: "", **user_input}
                 self._models = await _async_models(self.hass, self._data)
                 return None
-            errors["base"] = error
+            if not errors:
+                errors["base"] = error
+
+        form_defaults = dict(defaults)
+        if user_input is not None:
+            for field in (CONF_AWS_REGION, CONF_AWS_ACCESS_KEY_ID):
+                if field in user_input:
+                    form_defaults[field] = user_input[field]
 
         regions = await self._async_regions()
         schema = {
             probatio.Required(
-                CONF_AWS_REGION, default=defaults.get(CONF_AWS_REGION, DEFAULT_AWS_REGION)
+                CONF_AWS_REGION,
+                default=form_defaults.get(CONF_AWS_REGION, DEFAULT_AWS_REGION),
             ): SelectSelector(
                 SelectSelectorConfig(
                     options=[SelectOptionDict(value=k, label=v) for k, v in regions.items()],
@@ -218,7 +255,7 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
                     sort=False,
                 )
             ),
-            **_credentials_schema(defaults),
+            **_credentials_schema(form_defaults),
         }
         if step_id == "reconfigure":
             cost_sensor_default = defaults.get(
@@ -232,6 +269,14 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
                     default=cost_sensor_default,
                 )
             ] = BooleanSelector()
+            for key, default in (
+                (CONF_COST_TAG_KEY, DEFAULT_COST_TAG_KEY),
+                (CONF_COST_TAG_VALUE, DEFAULT_COST_TAG_VALUE),
+            ):
+                value = defaults.get(key, default)
+                if user_input is not None and key in user_input:
+                    value = user_input[key]
+                schema[probatio.Optional(key, default=value)] = TextSelector()
         return self.async_show_form(
             step_id=step_id, data_schema=probatio.Schema(schema), errors=errors
         )
@@ -318,21 +363,27 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
         """Pick the replacement model after the region changes."""
         entry = self._get_reconfigure_entry()
         agents = [s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_CONVERSATION]
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # The model is set for every agent: their old models may not exist
-            # in the new region. Each agent can be changed afterwards.
-            for agent in agents:
-                self.hass.config_entries.async_update_subentry(
-                    entry, agent, data={**agent.data, CONF_MODEL_ID: user_input[CONF_MODEL_ID]}
+            if self._data.get(
+                CONF_COST_SENSOR_ENABLED
+            ) and not is_application_inference_profile_arn(user_input.get(CONF_MODEL_ID)):
+                errors[CONF_MODEL_ID] = "application_profile_required"
+            else:
+                # The model is set for every agent: their old models may not exist
+                # in the new region. Each agent can be changed afterwards.
+                for agent in agents:
+                    self.hass.config_entries.async_update_subentry(
+                        entry, agent, data={**agent.data, CONF_MODEL_ID: user_input[CONF_MODEL_ID]}
+                    )
+                return self._async_update_and_finish(
+                    entry,
+                    # Keep a title the user chose.
+                    title=default_title(self._data[CONF_AWS_REGION])
+                    if is_default_title(entry.title)
+                    else entry.title,
+                    data=self._data,
                 )
-            return self._async_update_and_finish(
-                entry,
-                # Keep a title the user chose.
-                title=default_title(self._data[CONF_AWS_REGION])
-                if is_default_title(entry.title)
-                else entry.title,
-                data=self._data,
-            )
         current = agents[0].data.get(CONF_MODEL_ID) if agents else None
         # Offer the current model even if unlisted (e.g. a typed profile ARN)
         # when the region did not change.
@@ -347,7 +398,7 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
                     ): _model_selector(self._models, current if known else None),
                 }
             ),
-            errors={} if self._models else {"base": "no_models"},
+            errors=errors or ({} if self._models else {"base": "no_models"}),
             description_placeholders={
                 "region": self._data[CONF_AWS_REGION],
                 "count": str(len(self._models)),
@@ -402,9 +453,11 @@ class AgentSubentryFlow(ConfigSubentryFlow):
             return self.async_abort(reason="entry_not_loaded")
         is_new = self.source == SOURCE_USER
         options = self._options
+        agent_name = DEFAULT_AGENT_NAME
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            title = user_input.pop(CONF_NAME, None)
+            agent_name = user_input.pop(CONF_NAME, None) or DEFAULT_AGENT_NAME
             # Merge so settings that are not on the form are kept. Cleared
             # optional fields are left out by the frontend: drop them too.
             merged = {**options, **user_input}
@@ -413,19 +466,27 @@ class AgentSubentryFlow(ConfigSubentryFlow):
                     merged.pop(key, None)
             for key in (CONF_MAX_TOKENS, CONF_MAX_TOOL_CALL_ITERATIONS):
                 merged[key] = int(merged[key])
-            if is_new:
-                return self.async_create_entry(title=title or DEFAULT_AGENT_NAME, data=merged)
-            return self.async_update_and_abort(entry, self._get_reconfigure_subentry(), data=merged)
+            if entry.data.get(
+                CONF_COST_SENSOR_ENABLED
+            ) and not is_application_inference_profile_arn(merged.get(CONF_MODEL_ID)):
+                errors[CONF_MODEL_ID] = "application_profile_required"
+                options = self._options = merged
+            elif is_new:
+                return self.async_create_entry(title=agent_name, data=merged)
+            else:
+                return self.async_update_and_abort(
+                    entry, self._get_reconfigure_subentry(), data=merged
+                )
 
         models = await _async_models(self.hass, entry.data)
         schema: dict[Any, Any] = {}
         if is_new:
-            schema[probatio.Required(CONF_NAME, default=DEFAULT_AGENT_NAME)] = TextSelector()
+            schema[probatio.Required(CONF_NAME, default=agent_name)] = TextSelector()
         schema.update(_agent_schema(self.hass, options, models))
         return self.async_show_form(
             step_id="set_options",
             data_schema=probatio.Schema(schema),
-            errors={} if models else {"base": "no_models"},
+            errors=errors or ({} if models else {"base": "no_models"}),
             description_placeholders={
                 "region": entry.data[CONF_AWS_REGION],
                 "count": str(len(models)),

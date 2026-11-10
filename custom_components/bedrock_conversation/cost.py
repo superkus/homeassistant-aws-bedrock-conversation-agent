@@ -26,10 +26,13 @@ type _CostCoordinatorIdentity = tuple[str, Hashable]
 _COST_COORDINATORS: HassKey[dict[_CostCoordinatorIdentity, BedrockCostCoordinator]] = HassKey(
     f"{DOMAIN}_cost_coordinators"
 )
+_COST_EXPLORER_REQUEST_SLOT: HassKey[asyncio.Semaphore] = HassKey(
+    f"{DOMAIN}_cost_explorer_request_slot"
+)
 
 
 class BedrockCostCoordinator(DataUpdateCoordinator[CostExplorerData]):
-    """Fetch account-wide Amazon Bedrock month-to-date cost.
+    """Fetch application-tag-filtered Bedrock month-to-date cost.
 
     Cost Explorer data can lag by hours and can be revised by AWS. A failed
     refresh only makes the cost sensor unavailable; it never prevents or stops
@@ -40,8 +43,10 @@ class BedrockCostCoordinator(DataUpdateCoordinator[CostExplorerData]):
         self,
         hass: HomeAssistant,
         name_entry_id: str,
+        tag_key: str,
+        tag_value: str,
     ) -> None:
-        """Initialise an account coordinator without entry-owned scheduling."""
+        """Initialise an application-tag-filtered coordinator without entry-owned scheduling."""
         super().__init__(
             hass,
             LOGGER,
@@ -51,6 +56,9 @@ class BedrockCostCoordinator(DataUpdateCoordinator[CostExplorerData]):
             always_update=False,
         )
         self._entries: dict[str, tuple[ConfigEntry, BedrockClient]] = {}
+        self._request_slot = hass.data.setdefault(_COST_EXPLORER_REQUEST_SLOT, asyncio.Semaphore(1))
+        self.tag_key = tag_key
+        self.tag_value = tag_value
         self._initial_refresh_started = False
         self._authentication_failed = False
         self._initial_refresh_task: asyncio.Future[Any] | None = None
@@ -121,7 +129,13 @@ class BedrockCostCoordinator(DataUpdateCoordinator[CostExplorerData]):
             period_start = date(today.year, today.month, 1)
             period_end = today + timedelta(days=1)
             try:
-                data = await client.async_get_month_to_date_cost(period_start, period_end)
+                async with self._request_slot:
+                    data = await client.async_get_month_to_date_cost(
+                        period_start,
+                        period_end,
+                        self.tag_key,
+                        self.tag_value,
+                    )
                 self._authentication_failed = False
                 return data
             except BedrockAuthError as err:
@@ -163,17 +177,22 @@ async def async_acquire_cost_coordinator(
     hass: HomeAssistant,
     entry: ConfigEntry,
     client: BedrockClient,
+    tag_key: str,
+    tag_value: str,
 ) -> BedrockCostCoordinator:
-    """Return the coordinator shared by entries with this access-key identity."""
+    """Return the coordinator shared by entries with one key and tag filter."""
     access_key_id = entry.data.get(CONF_AWS_ACCESS_KEY_ID)
     identity: _CostCoordinatorIdentity = (
-        ("access_key", access_key_id)
+        (
+            "access_key_and_tag",
+            (access_key_id, tag_key, tag_value),
+        )
         if isinstance(access_key_id, str) and access_key_id
-        else ("entry", entry.entry_id)
+        else ("entry_and_tag", (entry.entry_id, tag_key, tag_value))
     )
     coordinators = hass.data.setdefault(_COST_COORDINATORS, {})
     if (coordinator := coordinators.get(identity)) is None:
-        coordinator = BedrockCostCoordinator(hass, entry.entry_id)
+        coordinator = BedrockCostCoordinator(hass, entry.entry_id, tag_key, tag_value)
         coordinators[identity] = coordinator
         await coordinator.async_register_shutdown()
     coordinator.async_add_entry(entry, client)

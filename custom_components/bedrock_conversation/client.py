@@ -89,7 +89,7 @@ class BedrockConnectionError(BedrockError):
 
 @dataclass(frozen=True, slots=True)
 class CostExplorerData:
-    """Actual Amazon Bedrock cost returned by AWS Cost Explorer."""
+    """Actual application-tag-filtered Bedrock cost from Cost Explorer."""
 
     amount: Decimal
     currency: str
@@ -107,8 +107,13 @@ class ModelOption:
     label: str
 
 
-def _build_cost_explorer_request(period_start: date, period_end: date) -> dict[str, Any]:
-    """Build an account-wide Bedrock Cost Explorer request."""
+def _build_cost_explorer_request(
+    period_start: date,
+    period_end: date,
+    tag_key: str,
+    tag_value: str,
+) -> dict[str, Any]:
+    """Build an application-tag-filtered Bedrock Cost Explorer request."""
     return {
         "TimePeriod": {
             "Start": period_start.isoformat(),
@@ -117,10 +122,21 @@ def _build_cost_explorer_request(period_start: date, period_end: date) -> dict[s
         "Granularity": "MONTHLY",
         "Metrics": [COST_EXPLORER_METRIC],
         "Filter": {
-            "Dimensions": {
-                "Key": "SERVICE",
-                "Values": [COST_EXPLORER_SERVICE],
-            }
+            "And": [
+                {
+                    "Dimensions": {
+                        "Key": "SERVICE",
+                        "Values": [COST_EXPLORER_SERVICE],
+                    }
+                },
+                {
+                    "Tags": {
+                        "Key": tag_key,
+                        "Values": [tag_value],
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+            ]
         },
     }
 
@@ -323,18 +339,23 @@ class BedrockClient:
         await self._async_control("list_foundation_models", byOutputModality="TEXT")
 
     async def async_get_month_to_date_cost(
-        self, period_start: date, period_end: date
+        self,
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
     ) -> CostExplorerData:
-        """Return actual account-wide Amazon Bedrock unblended cost.
+        """Return application-tag-filtered Bedrock cost as ``CostExplorerData``.
 
-        ``period_end`` is exclusive, matching Cost Explorer's API. Cost data is
-        delayed and may be revised by AWS; this method reports it verbatim.
+        ``period_start`` is inclusive and ``period_end`` is exclusive. The request
+        filters by ``SERVICE=Amazon Bedrock`` and the given ``tag_key`` and
+        ``tag_value``. Failures are translated to ``BedrockError`` subclasses.
         """
         if self._cost_explorer is None:
             await self.hass.async_add_executor_job(self._create_cost_explorer_client)
 
         def _call() -> CostExplorerData:
-            request = _build_cost_explorer_request(period_start, period_end)
+            request = _build_cost_explorer_request(period_start, period_end, tag_key, tag_value)
             expected_time_period = request["TimePeriod"]
             amount = Decimal(0)
             currency: str | None = None

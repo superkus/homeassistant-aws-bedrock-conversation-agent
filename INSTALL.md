@@ -96,30 +96,41 @@ Agent settings:
 
 To change the **region or credentials**, use **Reconfigure** in the entry's menu. If the region changes, you then choose a model from the list for the new region; it is set for **every** agent, because their old models may not exist in the new region. If only the credentials change, every agent keeps its model. Change individual agents afterwards with **Reconfigure agent**. A custom entry title is kept.
 
-### Month-to-date account cost sensor
+### Month-to-date application cost sensor
 
-The optional sensor reports actual AWS Cost Explorer billing data, not a token-based estimate. It is disabled by default. When you enable it, add this separate statement to the IAM policy's `Statement` array:
+The optional sensor reports actual AWS Cost Explorer billing data filtered by an application tag, not a token-based estimate. It is disabled by default.
 
-```json
-{
-  "Sid": "OptionalCostSensor",
-  "Effect": "Allow",
-  "Action": "ce:GetCostAndUsage",
-  "Resource": "*"
-}
-```
+Because the integration uses Bedrock's Converse API, make each model's billed usage taggable with **application inference profiles**:
 
-`ce:GetCostAndUsage` exposes account-wide billing data and AWS Cost Explorer does not support resource-level permissions for this action, so `Resource` must be `"*"`. Do not add this statement unless you enable the sensor.
+1. In Amazon Bedrock, create one application inference profile for each model used by a Home Assistant agent. A profile is model-specific.
+2. Add the same tag to every profile. The defaults expected by the integration are:
 
-1. Add the optional statement above to the IAM policy.
-2. Open the integration entry's menu and choose **Reconfigure**.
-3. Enable **Amazon Bedrock month-to-date cost sensor** and save. If the region did not change, agent models remain unchanged.
+   ```text
+   Application = HomeAssistantBedrockConversation
+   ```
 
-The sensor is entry-level because it covers all Amazon Bedrock usage visible to these AWS credentials, across every region and application, not one HA agent. It reports signed `UnblendedCost` for the current UTC billing month, uses the currency returned by AWS, and refreshes every 12 hours. Cost Explorer can lag by hours or about a day and may revise earlier values. Billing adjustments, refunds and credits can reduce the month-to-date value or make it negative, so automations and dashboards must not assume that it is non-negative or always increases. Its attributes show whether AWS marks the value estimated, the billing period, metric, scope and last update.
+3. In **AWS Billing and Cost Management → Cost allocation tags**, activate the `Application` tag. Tags can take up to 24 hours to appear and are not retroactive.
+4. In each **Reconfigure agent** form, replace the model ID/system profile with the application inference profile **ARN**, whose resource type is `application-inference-profile/`. Every agent must use an account-owned application profile before cost tracking can be enabled.
+5. Add this separate statement to the Home Assistant IAM policy's `Statement` array:
 
-Each enabled integration entry creates its own sensor entity. Entries that use the same access-key ID share one coordinator and do not duplicate Cost Explorer requests. The integration cannot tell that different access-key IDs belong to the same AWS account without another permission, so those entries can show duplicate account-wide totals. Enable the sensor on only one entry per AWS account, or treat multiple sensors as duplicate billing views; do not sum them. Home Assistant generates each entity ID from the entry and sensor names, and multiple entries can change the suffix, so confirm the entity ID in Home Assistant before using it in an automation or dashboard.
+   ```json
+   {
+     "Sid": "OptionalCostSensor",
+     "Effect": "Allow",
+     "Action": "ce:GetCostAndUsage",
+     "Resource": "*"
+   }
+   ```
 
-If Cost Explorer is unavailable or IAM permission is missing, only the sensor becomes unavailable. Conversation agents continue answering. Use Home Assistant's **Update entity** action for an on-demand refresh; frequent refreshes are discouraged because Cost Explorer data is delayed and requests may be billable.
+6. Open the integration entry's menu and choose **Reconfigure**. Enable **Amazon Bedrock month-to-date application cost sensor** and confirm the tag key/value.
+
+`ce:GetCostAndUsage` exposes billing data and does not support resource-level permissions, so `Resource` must be `"*"`. Dedicated application inference profiles make each model's usage taggable, but they do not scope the sensor query. The query filters only by `SERVICE=Amazon Bedrock` and the configured cost-allocation tag key/value; it does not filter by profile ARN. Only Bedrock usage with the exact configured tag key/value is included. Usage with a different or missing tag is excluded.
+
+The sensor reports signed `UnblendedCost` for the current UTC billing month, across all regions, in the currency returned by AWS. It refreshes every 12 hours. Cost Explorer can lag by hours or about a day and may revise earlier values. Billing adjustments, refunds and credits can reduce the value or make it negative. Attributes show the filter, estimate status, billing period, metric and last update.
+
+Entries using the same access-key ID and tag filter share one coordinator and AWS request. Home Assistant generates each entity ID from the entry and sensor names, so confirm it before using it in an automation or dashboard.
+
+If Cost Explorer is unavailable or IAM permission is missing, only the sensor becomes unavailable. Conversation agents continue answering. Use **Update entity** for an on-demand refresh; frequent refreshes are discouraged because billing data is delayed and Cost Explorer requests may be billable.
 
 ### Spoken confirmation for sensitive actions
 
@@ -202,7 +213,7 @@ logger:
 | The entry shows a setup error with only an AWS error code (for example `AccessDeniedException`) | Setup failed; the AWS message can contain your account ID, so only the code is shown. Access denied is logged as an error, other failures at debug level | Check the log (enable debug logging if needed); fix the IAM policy or network |
 | Devices are not controlled | Entities not exposed, no device control API selected, or a model without tool use | Expose the entities, select **Device control** in **Reconfigure agent**, choose a tool-capable model |
 | The assistant asks for confirmation | The action is sensitive (see above) | Answer "yes", or turn off spoken confirmation in **Reconfigure agent** |
-| Month-to-date account cost is unavailable | `ce:GetCostAndUsage` is missing, Cost Explorer has no data yet, or AWS returned a temporary billing error | Add the optional IAM permission, wait for AWS billing data, then use **Update entity**. Conversations are unaffected. |
+| Month-to-date application cost is unavailable or missing | An agent is not using an application inference profile ARN; the tag is not active/matching; `ce:GetCostAndUsage` is missing; or AWS has no tagged data yet | Configure and tag every application profile, activate the tag, add the optional IAM permission, then save entry-level **Reconfigure** and use **Update entity**. Conversations are unaffected. |
 | "The integration is not loaded. Check the credentials first." when adding or changing an agent | The entry failed to set up (credentials, IAM or network) | Fix the entry first (reauthenticate or **Reconfigure**), then retry |
 | "Unlock the front door" runs without confirmation | **Prefer handling commands locally** is on, so Home Assistant's built-in agent handled it | Turn that option off in the voice assistant |
 | Another agent says an action "needs confirmation, which this assistant cannot ask for" | That agent uses the **AWS Bedrock Services** API, which refuses sensitive actions to agents that cannot ask | Use this integration's agent for those actions |

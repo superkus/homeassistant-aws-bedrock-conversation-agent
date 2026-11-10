@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.1] - 2026-11-10
+
+### Fixed
+- Cost tracking is now application-tag-filtered instead of account-wide. AWS Cost Explorer is filtered only by `SERVICE=Amazon Bedrock` and a required activated cost-allocation tag key/value (default `Application=HomeAssistantBedrockConversation`).
+- Only Bedrock usage with the exact configured tag key/value is included; usage with a different or missing tag is excluded. The query does not filter by application inference profile ARN.
+- Enabling cost tracking now requires every agent to use an account-owned application inference profile ARN. ARN validation prevents using base and system profiles, which cannot carry the application tag. It does not verify profile tags, so attach and activate the exact configured tag on every profile.
+- Version 2.1.0 entries that enabled account-wide tracking without application profiles do not create a misleading sensor after updating; configure and tag application profiles first, then save entry-level Reconfigure.
+
+### Configuration
+- Added entry-level cost allocation tag key/value fields, with validated defaults `Application` and `HomeAssistantBedrockConversation`.
+- Create one application inference profile per model used by this integration, apply the same tag to each, activate the tag in AWS Billing, and use each profile ARN as the corresponding agent's model. AWS tags are not retroactive and can take up to 24 hours to appear.
+
 ## [2.1.0] - 2026-11-10
 
 ### Added

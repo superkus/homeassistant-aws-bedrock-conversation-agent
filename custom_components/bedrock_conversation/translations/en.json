@@ -44,12 +44,16 @@
           "aws_access_key_id": "Access key ID",
           "aws_secret_access_key": "Secret access key",
           "aws_session_token": "Session token (temporary credentials only)",
-          "cost_sensor_enabled": "Enable Amazon Bedrock month-to-date cost sensor"
+          "cost_sensor_enabled": "Enable Amazon Bedrock month-to-date application cost sensor",
+          "cost_allocation_tag_key": "Cost allocation tag key",
+          "cost_allocation_tag_value": "Cost allocation tag value"
         },
         "description": "Change the region or credentials. If the region changes, the next step lists model and inference-profile metadata for the new region; otherwise each agent keeps its model.",
         "data_description": {
           "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones.",
-          "cost_sensor_enabled": "Queries AWS Cost Explorer every 12 hours for actual account-wide Amazon Bedrock UnblendedCost across all regions. Requires ce:GetCostAndUsage. Billing data is delayed and may be revised."
+          "cost_sensor_enabled": "Queries AWS Cost Explorer every 12 hours for actual Amazon Bedrock UnblendedCost matching the required application tag across all regions. Requires ce:GetCostAndUsage. Billing data is delayed, non-retroactive and may be revised.",
+          "cost_allocation_tag_key": "An activated AWS cost allocation tag attached to every application inference profile used by this integration. Default: Application.",
+          "cost_allocation_tag_value": "The value identifying this application. Default: HomeAssistantBedrockConversation."
         }
       },
       "reconfigure_model": {
@@ -65,7 +69,10 @@
       "access_denied": "AWS accepted these credentials, but model metadata could not be listed. Grant bedrock:ListFoundationModels and bedrock:ListInferenceProfiles. Model invocation is checked later and requires bedrock:InvokeModelWithResponseStream.",
       "cannot_connect": "Could not reach AWS. Check the network connection.",
       "unknown": "Unexpected error, see the logs.",
-      "no_models": "No models could be listed for this region. You can still type a model or inference profile ID."
+      "no_models": "No models could be listed for this region. You can still type a model or inference profile ID.",
+      "invalid_cost_tag": "Enter a non-empty cost tag key (up to 128 characters, not starting with aws:) and value (up to 256 characters).",
+      "cost_requires_application_profiles": "Every agent must use an application inference profile ARN before application cost tracking can be enabled.",
+      "application_profile_required": "Cost tracking is enabled. Select an application inference profile ARN tagged for this application."
     },
     "abort": {
       "already_configured": "These credentials are already set up for this region.",
@@ -148,7 +155,8 @@
         }
       },
       "error": {
-        "no_models": "No models could be listed for this region. You can still type a model or inference profile ID."
+        "no_models": "No models could be listed for this region. You can still type a model or inference profile ID.",
+        "application_profile_required": "Cost tracking is enabled. Select an application inference profile ARN tagged for this application."
       },
       "abort": {
         "entry_not_loaded": "The integration is not loaded. Check the credentials first.",
@@ -159,7 +167,7 @@
   "entity": {
     "sensor": {
       "month_to_date_account_cost": {
-        "name": "Month-to-date account cost",
+        "name": "Month-to-date application cost",
         "state_attributes": {
           "estimated": {
             "name": "Estimated by AWS"
@@ -177,7 +185,16 @@
             "name": "Cost metric"
           },
           "scope": {
-            "name": "Scope"
+            "name": "Filtered scope",
+            "state": {
+              "application_tag_all_regions": "Amazon Bedrock with application tag, all regions"
+            }
+          },
+          "cost_allocation_tag_key": {
+            "name": "Cost allocation tag key"
+          },
+          "cost_allocation_tag_value": {
+            "name": "Cost allocation tag value"
           }
         }
       }

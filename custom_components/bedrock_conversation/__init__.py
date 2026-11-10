@@ -31,20 +31,28 @@ from .const import (
     CONF_AWS_REGION,
     CONF_AWS_SESSION_TOKEN,
     CONF_COST_SENSOR_ENABLED,
+    CONF_COST_TAG_KEY,
+    CONF_COST_TAG_VALUE,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
+    CONF_MODEL_ID,
     CONF_PROMPT,
     CONF_TEMPERATURE,
     DEFAULT_AWS_REGION,
     DEFAULT_COST_SENSOR_ENABLED,
+    DEFAULT_COST_TAG_KEY,
+    DEFAULT_COST_TAG_VALUE,
     DOMAIN,
     HOME_LLM_API_ID,
     LOGGER,
     SUBENTRY_CONVERSATION,
     default_title,
     exposure_bounded_llm_api_ids,
+    is_application_inference_profile_arn,
     is_default_title,
+    normalize_cost_tag_key,
+    normalize_cost_tag_value,
 )
 from .cost import (
     BedrockCostCoordinator,
@@ -94,15 +102,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: BedrockConfigEntry) -> N
         raise ConfigEntryNotReady(err.code) from err
 
     coordinator = None
-    if entry.data.get(CONF_COST_SENSOR_ENABLED, DEFAULT_COST_SENSOR_ENABLED):
-        coordinator = await async_acquire_cost_coordinator(hass, entry, client)
-        entry.async_on_unload(
-            partial(
-                async_release_cost_coordinator,
-                hass,
-                entry.entry_id,
-                coordinator,
+    cost_enabled = entry.data.get(CONF_COST_SENSOR_ENABLED, DEFAULT_COST_SENSOR_ENABLED)
+    agents = [
+        subentry
+        for subentry in entry.subentries.values()
+        if subentry.subentry_type == SUBENTRY_CONVERSATION
+    ]
+    if (
+        cost_enabled
+        and agents
+        and all(
+            is_application_inference_profile_arn(agent.data.get(CONF_MODEL_ID)) for agent in agents
+        )
+    ):
+        try:
+            tag_key = normalize_cost_tag_key(
+                entry.data.get(CONF_COST_TAG_KEY, DEFAULT_COST_TAG_KEY)
             )
+            tag_value = normalize_cost_tag_value(
+                entry.data.get(CONF_COST_TAG_VALUE, DEFAULT_COST_TAG_VALUE)
+            )
+        except ValueError:
+            LOGGER.warning("Cost sensor not loaded: invalid cost allocation tag configuration")
+        else:
+            coordinator = await async_acquire_cost_coordinator(
+                hass, entry, client, tag_key, tag_value
+            )
+            entry.async_on_unload(
+                partial(
+                    async_release_cost_coordinator,
+                    hass,
+                    entry.entry_id,
+                    coordinator,
+                )
+            )
+    elif cost_enabled:
+        LOGGER.warning(
+            "Cost sensor not loaded: every agent must use an application inference profile ARN"
         )
     entry.runtime_data = BedrockRuntimeData(
         client=client,

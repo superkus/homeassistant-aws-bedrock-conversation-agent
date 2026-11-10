@@ -473,7 +473,7 @@ async def test_temperature_fallback_composes_with_profile_and_cache_fallbacks(
 async def test_month_to_date_cost_request_and_decimal_result(
     client: BedrockClient,
 ) -> None:
-    """Cost Explorer request is account-wide and preserves decimal precision."""
+    """Cost Explorer request is application-tag-filtered and preserves precision."""
     client._cost_explorer.get_cost_and_usage.return_value = {
         "ResultsByTime": [
             {
@@ -489,7 +489,12 @@ async def test_month_to_date_cost_request_and_decimal_result(
         ]
     }
 
-    result = await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+    result = await client.async_get_month_to_date_cost(
+        date(2026, 11, 1),
+        date(2026, 11, 11),
+        "Application",
+        "HomeAssistantBedrockConversation",
+    )
 
     assert result.amount == Decimal("0.0123456789")
     assert result.currency == "USD"
@@ -501,10 +506,21 @@ async def test_month_to_date_cost_request_and_decimal_result(
         Granularity="MONTHLY",
         Metrics=[COST_EXPLORER_METRIC],
         Filter={
-            "Dimensions": {
-                "Key": "SERVICE",
-                "Values": [COST_EXPLORER_SERVICE],
-            }
+            "And": [
+                {
+                    "Dimensions": {
+                        "Key": "SERVICE",
+                        "Values": [COST_EXPLORER_SERVICE],
+                    }
+                },
+                {
+                    "Tags": {
+                        "Key": "Application",
+                        "Values": ["HomeAssistantBedrockConversation"],
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+            ]
         },
     )
 
@@ -533,7 +549,12 @@ async def test_month_to_date_cost_pagination(client: BedrockClient) -> None:
         },
     ]
 
-    result = await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+    result = await client.async_get_month_to_date_cost(
+        date(2026, 11, 1),
+        date(2026, 11, 11),
+        "Application",
+        "HomeAssistantBedrockConversation",
+    )
 
     assert result.amount == Decimal("3.3")
     assert result.currency == "EUR"
@@ -557,7 +578,12 @@ async def test_invalid_cost_response_is_an_error(
     """Missing or malformed billing totals never become a misleading zero."""
     client._cost_explorer.get_cost_and_usage.return_value = response
     with pytest.raises(BedrockError) as err:
-        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+        await client.async_get_month_to_date_cost(
+            date(2026, 11, 1),
+            date(2026, 11, 11),
+            "Application",
+            "HomeAssistantBedrockConversation",
+        )
     assert err.value.code in {"CostDataUnavailable", "InvalidCostExplorerResponse"}
 
 
@@ -567,7 +593,12 @@ async def test_cost_access_denied_is_translated(client: BedrockClient) -> None:
         "AccessDeniedException", "principal 123456789012 is denied"
     )
     with pytest.raises(BedrockAccessDeniedError):
-        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+        await client.async_get_month_to_date_cost(
+            date(2026, 11, 1),
+            date(2026, 11, 11),
+            "Application",
+            "HomeAssistantBedrockConversation",
+        )
 
 
 @pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity"])
@@ -584,7 +615,12 @@ async def test_non_finite_cost_amount_is_rejected(client: BedrockClient, amount:
     }
 
     with pytest.raises(BedrockError) as err:
-        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+        await client.async_get_month_to_date_cost(
+            date(2026, 11, 1),
+            date(2026, 11, 11),
+            "Application",
+            "HomeAssistantBedrockConversation",
+        )
 
     assert err.value.code == "InvalidCostExplorerResponse"
 
@@ -610,7 +646,12 @@ async def test_cost_result_period_must_match_request(
     client._cost_explorer.get_cost_and_usage.return_value = {"ResultsByTime": [result]}
 
     with pytest.raises(BedrockError) as err:
-        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+        await client.async_get_month_to_date_cost(
+            date(2026, 11, 1),
+            date(2026, 11, 11),
+            "Application",
+            "HomeAssistantBedrockConversation",
+        )
 
     assert err.value.code == "InvalidCostExplorerResponse"
 
@@ -631,6 +672,11 @@ async def test_cost_estimated_flag_must_be_boolean(
     }
 
     with pytest.raises(BedrockError) as err:
-        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+        await client.async_get_month_to_date_cost(
+            date(2026, 11, 1),
+            date(2026, 11, 11),
+            "Application",
+            "HomeAssistantBedrockConversation",
+        )
 
     assert err.value.code == "InvalidCostExplorerResponse"

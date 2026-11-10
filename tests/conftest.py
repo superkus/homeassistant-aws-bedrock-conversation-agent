@@ -109,7 +109,7 @@ class FakeBedrock:
         self.models = list(MODELS)
         self.validate_error: Exception | None = None
         self.cost_error: Exception | None = None
-        self.cost_calls: list[tuple[date, date]] = []
+        self.cost_calls: list[tuple[date, date, str, str]] = []
         self.cost_data = CostExplorerData(
             amount=Decimal("1.234567"),
             currency="USD",
@@ -136,8 +136,14 @@ class FakeBedrock:
     async def list_models(self) -> list[ModelOption]:
         return self.models
 
-    async def get_cost(self, period_start: date, period_end: date) -> CostExplorerData:
-        self.cost_calls.append((period_start, period_end))
+    async def get_cost(
+        self,
+        period_start: date,
+        period_end: date,
+        tag_key: str,
+        tag_value: str,
+    ) -> CostExplorerData:
+        self.cost_calls.append((period_start, period_end, tag_key, tag_value))
         if self.cost_error:
             raise self.cost_error
         return self.cost_data
@@ -158,7 +164,9 @@ def bedrock() -> FakeBedrock:
         patch.object(
             BedrockClient,
             "async_get_month_to_date_cost",
-            lambda _c, start, end: fake.get_cost(start, end),
+            lambda _c, start, end, tag_key, tag_value: fake.get_cost(
+                start, end, tag_key, tag_value
+            ),
         ),
         patch.object(
             BedrockClient, "async_converse_stream", lambda _c, kw: fake.converse_stream(kw)
