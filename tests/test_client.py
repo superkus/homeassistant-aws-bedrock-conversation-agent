@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
+from decimal import Decimal
 import threading
 from typing import Any
 from unittest.mock import MagicMock
@@ -20,7 +22,11 @@ from custom_components.bedrock_conversation.client import (
     _profile_preference,
     translate_error,
 )
-from custom_components.bedrock_conversation.const import BEDROCK_STREAM_QUEUE_MAXSIZE
+from custom_components.bedrock_conversation.const import (
+    BEDROCK_STREAM_QUEUE_MAXSIZE,
+    COST_EXPLORER_METRIC,
+    COST_EXPLORER_SERVICE,
+)
 
 from .conftest import ENTRY_DATA
 
@@ -125,6 +131,7 @@ def client(hass: HomeAssistant) -> BedrockClient:
     client = BedrockClient(hass, ENTRY_DATA)
     client._runtime = MagicMock()
     client._control = MagicMock()
+    client._cost_explorer = MagicMock()
     client._control.list_foundation_models.return_value = FOUNDATION_MODELS
     client._control.get_paginator.return_value.paginate.return_value = [
         {"inferenceProfileSummaries": PROFILES}
@@ -139,9 +146,22 @@ def test_boto_clients_use_two_total_attempts(hass: HomeAssistant) -> None:
     try:
         assert client._runtime.meta.config.retries["total_max_attempts"] == 2
         assert client._control.meta.config.retries["total_max_attempts"] == 2
+        assert client._cost_explorer is None  # billing stays lazy when disabled
     finally:
         client._runtime.close()
         client._control.close()
+
+
+def test_cost_explorer_client_is_global_and_lazy(hass: HomeAssistant) -> None:
+    """Cost Explorer is created only on demand at AWS's global endpoint."""
+    client = BedrockClient(hass, ENTRY_DATA)
+    assert client._cost_explorer is None
+    client._create_cost_explorer_client()
+    try:
+        assert client._cost_explorer.meta.endpoint_url == "https://ce.us-east-1.amazonaws.com"
+        assert client._cost_explorer.meta.region_name == "aws-global"
+    finally:
+        client._cost_explorer.close()
 
 
 async def _collect(client: BedrockClient, kwargs: dict) -> list[dict]:
@@ -448,3 +468,169 @@ async def test_temperature_fallback_composes_with_profile_and_cache_fallbacks(
     assert kwargs["modelId"] == "anthropic.claude-x"
     assert kwargs["inferenceConfig"]["temperature"] == 0.5
     assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+
+
+async def test_month_to_date_cost_request_and_decimal_result(
+    client: BedrockClient,
+) -> None:
+    """Cost Explorer request is account-wide and preserves decimal precision."""
+    client._cost_explorer.get_cost_and_usage.return_value = {
+        "ResultsByTime": [
+            {
+                "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-11"},
+                "Total": {
+                    COST_EXPLORER_METRIC: {
+                        "Amount": "0.0123456789",
+                        "Unit": "USD",
+                    }
+                },
+                "Estimated": True,
+            }
+        ]
+    }
+
+    result = await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+    assert result.amount == Decimal("0.0123456789")
+    assert result.currency == "USD"
+    assert result.estimated is True
+    assert result.period_start == date(2026, 11, 1)
+    assert result.period_end == date(2026, 11, 11)
+    client._cost_explorer.get_cost_and_usage.assert_called_once_with(
+        TimePeriod={"Start": "2026-11-01", "End": "2026-11-11"},
+        Granularity="MONTHLY",
+        Metrics=[COST_EXPLORER_METRIC],
+        Filter={
+            "Dimensions": {
+                "Key": "SERVICE",
+                "Values": [COST_EXPLORER_SERVICE],
+            }
+        },
+    )
+
+
+async def test_month_to_date_cost_pagination(client: BedrockClient) -> None:
+    """Defensive pagination sums matching currency and estimated flags."""
+    client._cost_explorer.get_cost_and_usage.side_effect = [
+        {
+            "ResultsByTime": [
+                {
+                    "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-11"},
+                    "Total": {COST_EXPLORER_METRIC: {"Amount": "1.1", "Unit": "EUR"}},
+                    "Estimated": False,
+                }
+            ],
+            "NextPageToken": "next",
+        },
+        {
+            "ResultsByTime": [
+                {
+                    "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-11"},
+                    "Total": {COST_EXPLORER_METRIC: {"Amount": "2.2", "Unit": "EUR"}},
+                    "Estimated": True,
+                }
+            ]
+        },
+    ]
+
+    result = await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+    assert result.amount == Decimal("3.3")
+    assert result.currency == "EUR"
+    assert result.estimated is True
+    assert (
+        client._cost_explorer.get_cost_and_usage.call_args_list[1].kwargs["NextPageToken"] == "next"
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"ResultsByTime": []},
+        {"ResultsByTime": [{"Total": {COST_EXPLORER_METRIC: {"Amount": "x", "Unit": "USD"}}}]},
+        {"ResultsByTime": [{"Total": {COST_EXPLORER_METRIC: {"Amount": "1", "Unit": ""}}}]},
+    ],
+)
+async def test_invalid_cost_response_is_an_error(
+    client: BedrockClient, response: dict[str, Any]
+) -> None:
+    """Missing or malformed billing totals never become a misleading zero."""
+    client._cost_explorer.get_cost_and_usage.return_value = response
+    with pytest.raises(BedrockError) as err:
+        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+    assert err.value.code in {"CostDataUnavailable", "InvalidCostExplorerResponse"}
+
+
+async def test_cost_access_denied_is_translated(client: BedrockClient) -> None:
+    """Billing IAM failures use the existing safe AWS error type."""
+    client._cost_explorer.get_cost_and_usage.side_effect = _client_error(
+        "AccessDeniedException", "principal 123456789012 is denied"
+    )
+    with pytest.raises(BedrockAccessDeniedError):
+        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+
+@pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity"])
+async def test_non_finite_cost_amount_is_rejected(client: BedrockClient, amount: str) -> None:
+    """Non-finite Decimal values never become a monetary sensor value."""
+    client._cost_explorer.get_cost_and_usage.return_value = {
+        "ResultsByTime": [
+            {
+                "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-11"},
+                "Total": {COST_EXPLORER_METRIC: {"Amount": amount, "Unit": "USD"}},
+                "Estimated": False,
+            }
+        ]
+    }
+
+    with pytest.raises(BedrockError) as err:
+        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+    assert err.value.code == "InvalidCostExplorerResponse"
+
+
+@pytest.mark.parametrize(
+    "time_period",
+    [
+        None,
+        {"Start": "2026-10-01", "End": "2026-11-11"},
+        {"Start": "2026-11-01", "End": "2026-11-10"},
+    ],
+)
+async def test_cost_result_period_must_match_request(
+    client: BedrockClient, time_period: dict[str, str] | None
+) -> None:
+    """Every Cost Explorer result covers exactly the requested UTC interval."""
+    result = {
+        "Total": {COST_EXPLORER_METRIC: {"Amount": "1", "Unit": "USD"}},
+        "Estimated": False,
+    }
+    if time_period is not None:
+        result["TimePeriod"] = time_period
+    client._cost_explorer.get_cost_and_usage.return_value = {"ResultsByTime": [result]}
+
+    with pytest.raises(BedrockError) as err:
+        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+    assert err.value.code == "InvalidCostExplorerResponse"
+
+
+@pytest.mark.parametrize("estimated", ["false", 0, None])
+async def test_cost_estimated_flag_must_be_boolean(
+    client: BedrockClient, estimated: object
+) -> None:
+    """A present Estimated value must be a real boolean, not merely truthy or falsey."""
+    client._cost_explorer.get_cost_and_usage.return_value = {
+        "ResultsByTime": [
+            {
+                "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-11"},
+                "Total": {COST_EXPLORER_METRIC: {"Amount": "1", "Unit": "USD"}},
+                "Estimated": estimated,
+            }
+        ]
+    }
+
+    with pytest.raises(BedrockError) as err:
+        await client.async_get_month_to_date_cost(date(2026, 11, 1), date(2026, 11, 11))
+
+    assert err.value.code == "InvalidCostExplorerResponse"

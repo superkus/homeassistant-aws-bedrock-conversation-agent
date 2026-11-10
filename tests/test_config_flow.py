@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
+import probatio
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
@@ -26,6 +27,7 @@ from custom_components.bedrock_conversation.const import (
     CONF_AWS_SECRET_ACCESS_KEY,
     CONF_AWS_SESSION_TOKEN,
     CONF_CONFIRM_SENSITIVE_ACTIONS,
+    CONF_COST_SENSOR_ENABLED,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
@@ -465,3 +467,80 @@ async def test_only_exposure_bounded_apis_are_selectable(
     assert llm.LLM_API_HOME_ASSISTANT not in {
         option["value"] for option in selector.config["options"]
     }
+
+
+async def test_reconfigure_enables_entry_level_cost_sensor(
+    hass: HomeAssistant, config_entry: MockConfigEntry, bedrock: FakeBedrock
+) -> None:
+    """Cost Explorer is an opt-in credential-entry setting, not an agent option."""
+    result = await config_entry.start_reconfigure_flow(hass)
+    assert CONF_COST_SENSOR_ENABLED in result["data_schema"].schema
+    marker = next(
+        field for field in result["data_schema"].schema if field == CONF_COST_SENSOR_ENABLED
+    )
+    assert marker.default() is False
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {**CREDENTIALS, CONF_COST_SENSOR_ENABLED: True},
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+
+    assert config_entry.data[CONF_COST_SENSOR_ENABLED] is True
+    assert config_entry.runtime_data.cost_coordinator is not None
+    assert all(
+        CONF_COST_SENSOR_ENABLED not in agent.data for agent in config_entry.subentries.values()
+    )
+
+
+async def test_new_entry_does_not_enable_cost_sensor_implicitly(
+    hass: HomeAssistant, bedrock: FakeBedrock
+) -> None:
+    """The setup flow requires no billing permission and stores no opt-in."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert CONF_COST_SENSOR_ENABLED not in result["data_schema"].schema
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL_ID: MODEL}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert CONF_COST_SENSOR_ENABLED not in result["data"]
+
+
+@pytest.mark.parametrize(
+    ("initially_enabled", "submitted_enabled"),
+    [(False, True), (True, False)],
+)
+async def test_failed_reconfigure_preserves_submitted_cost_sensor_choice(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    bedrock: FakeBedrock,
+    initially_enabled: bool,
+    submitted_enabled: bool,
+) -> None:
+    """A credential error keeps the submitted billing opt-in on the retry form."""
+    hass.config_entries.async_update_entry(
+        config_entry,
+        data={**config_entry.data, CONF_COST_SENSOR_ENABLED: initially_enabled},
+    )
+    await hass.async_block_till_done()
+    bedrock.validate_error = BedrockAuthError("InvalidSignatureException", "bad")
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {**CREDENTIALS, CONF_COST_SENSOR_ENABLED: submitted_enabled},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+    schema = result["data_schema"].schema
+    cost_marker = next(field for field in schema if field == CONF_COST_SENSOR_ENABLED)
+    assert cost_marker.default() is submitted_enabled
+    for secret_name in (CONF_AWS_SECRET_ACCESS_KEY, CONF_AWS_SESSION_TOKEN):
+        secret_marker = next(field for field in schema if field == secret_name)
+        assert secret_marker.default is probatio.UNDEFINED

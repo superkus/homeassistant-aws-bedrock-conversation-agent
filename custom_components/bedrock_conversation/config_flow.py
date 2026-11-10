@@ -55,6 +55,7 @@ from .const import (
     CONF_AWS_SECRET_ACCESS_KEY,
     CONF_AWS_SESSION_TOKEN,
     CONF_CONFIRM_SENSITIVE_ACTIONS,
+    CONF_COST_SENSOR_ENABLED,
     CONF_LLM_HASS_API,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALL_ITERATIONS,
@@ -65,6 +66,7 @@ from .const import (
     DEFAULT_AGENT_NAME,
     DEFAULT_AWS_REGION,
     DEFAULT_CONFIRM_SENSITIVE_ACTIONS,
+    DEFAULT_COST_SENSOR_ENABLED,
     DEFAULT_LLM_HASS_API,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALL_ITERATIONS,
@@ -218,6 +220,18 @@ class BedrockConversationConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             **_credentials_schema(defaults),
         }
+        if step_id == "reconfigure":
+            cost_sensor_default = defaults.get(
+                CONF_COST_SENSOR_ENABLED, DEFAULT_COST_SENSOR_ENABLED
+            )
+            if user_input is not None and CONF_COST_SENSOR_ENABLED in user_input:
+                cost_sensor_default = user_input[CONF_COST_SENSOR_ENABLED]
+            schema[
+                probatio.Optional(
+                    CONF_COST_SENSOR_ENABLED,
+                    default=cost_sensor_default,
+                )
+            ] = BooleanSelector()
         return self.async_show_form(
             step_id=step_id, data_schema=probatio.Schema(schema), errors=errors
         )

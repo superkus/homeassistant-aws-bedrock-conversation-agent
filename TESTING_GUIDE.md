@@ -56,6 +56,17 @@ Turn off **Prefer handling commands locally** in the voice assistant first; othe
 - [ ] With **Spoken confirmation** off: sensitive actions run directly.
 - [ ] Another agent (for example a second LLM integration) using **AWS Bedrock Services**: "unlock" is refused.
 
+## Month-to-date account cost
+
+- [ ] Without enabling the sensor, no cost entity exists and conversations work with the original Bedrock-only IAM policy.
+- [ ] Add the separate optional statement allowing `ce:GetCostAndUsage` on `Resource: "*"`, then use entry-level **Reconfigure** to enable the sensor: an entry-level monetary sensor appears in AWS's returned currency. Confirm that this account-wide action cannot be restricted to individual resources.
+- [ ] Check its attributes: current UTC billing period, `UnblendedCost`, account-wide/all-regions scope, AWS estimated flag and last update.
+- [ ] Run Home Assistant's **Update entity** action: the sensor refreshes on demand.
+- [ ] Remove `ce:GetCostAndUsage` and refresh: only the cost sensor becomes unavailable; conversation agents still answer. Restore the permission afterwards.
+- [ ] At the next UTC month boundary, `last_reset` moves to the first of the new month.
+
+Remember that Cost Explorer data is delayed and can be revised; compare it with the AWS Billing console rather than expecting an immediate per-request increase. Billing adjustments, refunds and credits can reduce the value or make it negative. With multiple enabled entries, confirm that each entry has an entity and that entries sharing an access-key ID show the shared result; never sum duplicate account-wide views from credentials belonging to the same AWS account.
+
 ## Errors
 
 - [ ] Remove `bedrock:InvokeModelWithResponseStream` from the IAM policy: "Access to this Bedrock model was denied (AccessDeniedException)".

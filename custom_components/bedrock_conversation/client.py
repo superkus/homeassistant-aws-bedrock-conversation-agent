@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
 import copy
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 import threading
 from typing import Any
 
@@ -23,6 +25,7 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import (
     BEDROCK_CONNECT_TIMEOUT,
@@ -34,6 +37,8 @@ from .const import (
     CONF_AWS_REGION,
     CONF_AWS_SECRET_ACCESS_KEY,
     CONF_AWS_SESSION_TOKEN,
+    COST_EXPLORER_METRIC,
+    COST_EXPLORER_SERVICE,
     DEFAULT_AWS_REGION,
     LOGGER,
 )
@@ -83,11 +88,86 @@ class BedrockConnectionError(BedrockError):
 
 
 @dataclass(frozen=True, slots=True)
+class CostExplorerData:
+    """Actual Amazon Bedrock cost returned by AWS Cost Explorer."""
+
+    amount: Decimal
+    currency: str
+    period_start: date
+    period_end: date
+    estimated: bool
+    retrieved_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ModelOption:
     """A model or inference profile the user can pick."""
 
     id: str
     label: str
+
+
+def _build_cost_explorer_request(period_start: date, period_end: date) -> dict[str, Any]:
+    """Build an account-wide Bedrock Cost Explorer request."""
+    return {
+        "TimePeriod": {
+            "Start": period_start.isoformat(),
+            "End": period_end.isoformat(),
+        },
+        "Granularity": "MONTHLY",
+        "Metrics": [COST_EXPLORER_METRIC],
+        "Filter": {
+            "Dimensions": {
+                "Key": "SERVICE",
+                "Values": [COST_EXPLORER_SERVICE],
+            }
+        },
+    }
+
+
+def _parse_cost_explorer_result(
+    result: object, expected_time_period: Mapping[str, str]
+) -> tuple[Decimal, str, bool] | None:
+    """Validate and parse one Cost Explorer time-period result."""
+    if not isinstance(result, Mapping):
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result is not an object",
+        )
+    if result.get("TimePeriod") != expected_time_period:
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result period does not match the requested period",
+        )
+    if "Estimated" in result and type(result["Estimated"]) is not bool:
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result estimated flag is not boolean",
+        )
+    total = result.get("Total", {})
+    metric = total.get(COST_EXPLORER_METRIC) if isinstance(total, Mapping) else None
+    if not isinstance(metric, dict):
+        return None
+    raw_amount = metric.get("Amount")
+    currency = metric.get("Unit")
+    if not isinstance(raw_amount, str) or not isinstance(currency, str) or not currency:
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result has no valid amount or currency",
+        )
+    try:
+        amount = Decimal(raw_amount)
+    except InvalidOperation as err:
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result amount is not numeric",
+        ) from err
+    if not amount.is_finite():
+        raise BedrockError(
+            "InvalidCostExplorerResponse",
+            "Cost result amount is not finite",
+        )
+    return amount, currency, result.get("Estimated", False)
 
 
 def translate_error(err: Exception) -> BedrockError:
@@ -198,6 +278,7 @@ class BedrockClient:
         }
         self._runtime: Any = None
         self._control: Any = None
+        self._cost_explorer: Any = None
         # Models that rejected temperature; newer reasoning models deprecate it.
         self._no_temperature_models: set[str] = set()
         # Models that rejected prompt cache points; skip caching for them.
@@ -213,6 +294,13 @@ class BedrockClient:
         config = _boto_config()
         self._runtime = session.client("bedrock-runtime", config=config)
         self._control = session.client("bedrock", config=config)
+
+    def _create_cost_explorer_client(self) -> None:
+        """Create Cost Explorer lazily so disabled billing cannot affect chat."""
+        session = boto3.Session(region_name=self.region, **self._credentials)
+        # Cost Explorer is a global endpoint in commercial partitions; boto3
+        # resolves it to aws-global/us-east-1 from any configured Bedrock region.
+        self._cost_explorer = session.client("ce", config=_boto_config())
 
     async def async_setup(self) -> None:
         """Create the boto3 clients (endpoint data loads from disk)."""
@@ -233,6 +321,68 @@ class BedrockClient:
     async def async_validate(self) -> None:
         """Check the credentials can list model metadata in the region."""
         await self._async_control("list_foundation_models", byOutputModality="TEXT")
+
+    async def async_get_month_to_date_cost(
+        self, period_start: date, period_end: date
+    ) -> CostExplorerData:
+        """Return actual account-wide Amazon Bedrock unblended cost.
+
+        ``period_end`` is exclusive, matching Cost Explorer's API. Cost data is
+        delayed and may be revised by AWS; this method reports it verbatim.
+        """
+        if self._cost_explorer is None:
+            await self.hass.async_add_executor_job(self._create_cost_explorer_client)
+
+        def _call() -> CostExplorerData:
+            request = _build_cost_explorer_request(period_start, period_end)
+            expected_time_period = request["TimePeriod"]
+            amount = Decimal(0)
+            currency: str | None = None
+            estimated = False
+            result_count = 0
+            while True:
+                response = self._cost_explorer.get_cost_and_usage(**request)
+                results = response.get("ResultsByTime", [])
+                if not isinstance(results, list):
+                    raise BedrockError(
+                        "InvalidCostExplorerResponse",
+                        "Cost results are not a list",
+                    )
+                for result in results:
+                    parsed_result = _parse_cost_explorer_result(result, expected_time_period)
+                    if parsed_result is None:
+                        continue
+                    result_amount, result_currency, result_estimated = parsed_result
+                    amount += result_amount
+                    if currency is not None and currency != result_currency:
+                        raise BedrockError(
+                            "InvalidCostExplorerResponse",
+                            "Cost results use more than one currency",
+                        )
+                    currency = result_currency
+                    estimated = estimated or result_estimated
+                    result_count += 1
+                if not (next_token := response.get("NextPageToken")):
+                    break
+                request["NextPageToken"] = next_token
+            if result_count == 0 or currency is None:
+                raise BedrockError(
+                    "CostDataUnavailable",
+                    "Cost Explorer returned no Amazon Bedrock total",
+                )
+            return CostExplorerData(
+                amount=amount,
+                currency=currency,
+                period_start=period_start,
+                period_end=period_end,
+                estimated=estimated,
+                retrieved_at=dt_util.utcnow(),
+            )
+
+        try:
+            return await self.hass.async_add_executor_job(_call)
+        except Exception as err:
+            raise translate_error(err) from err
 
     async def _async_list_profiles(self) -> list[dict[str, Any]]:
         if self._control is None:

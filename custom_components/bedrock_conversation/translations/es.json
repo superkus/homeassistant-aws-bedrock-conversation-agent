@@ -43,11 +43,13 @@
           "aws_region": "Región de AWS",
           "aws_access_key_id": "ID de clave de acceso",
           "aws_secret_access_key": "Clave de acceso secreta",
-          "aws_session_token": "Token de sesión (solo credenciales temporales)"
+          "aws_session_token": "Token de sesión (solo credenciales temporales)",
+          "cost_sensor_enabled": "Activar el sensor de coste mensual de Amazon Bedrock"
         },
         "description": "Cambia la región o las credenciales. Si cambias la región, el siguiente paso muestra metadatos de modelos y perfiles de inferencia de la nueva región; si no, cada agente conserva su modelo.",
         "data_description": {
-          "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas."
+          "aws_session_token": "Déjalo vacío si usas claves permanentes de un usuario IAM. Las credenciales temporales caducan y Home Assistant pedirá unas nuevas.",
+          "cost_sensor_enabled": "Consulta AWS Cost Explorer cada 12 horas para obtener el UnblendedCost real de Amazon Bedrock en toda la cuenta y todas las regiones. Requiere ce:GetCostAndUsage. Los datos de facturación llegan con retraso y AWS puede revisarlos."
         }
       },
       "reconfigure_model": {
@@ -151,6 +153,33 @@
       "abort": {
         "entry_not_loaded": "La integración no está cargada. Revisa primero las credenciales.",
         "reconfigure_successful": "Agente actualizado."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "month_to_date_account_cost": {
+        "name": "Coste de la cuenta en lo que va de mes",
+        "state_attributes": {
+          "estimated": {
+            "name": "Estimado por AWS"
+          },
+          "billing_period_start": {
+            "name": "Inicio del período de facturación"
+          },
+          "billing_period_end_exclusive": {
+            "name": "Fin del período (exclusivo)"
+          },
+          "last_updated": {
+            "name": "Última actualización"
+          },
+          "metric": {
+            "name": "Métrica de coste"
+          },
+          "scope": {
+            "name": "Ámbito"
+          }
+        }
       }
     }
   }

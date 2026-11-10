@@ -43,11 +43,13 @@
           "aws_region": "AWS region",
           "aws_access_key_id": "Access key ID",
           "aws_secret_access_key": "Secret access key",
-          "aws_session_token": "Session token (temporary credentials only)"
+          "aws_session_token": "Session token (temporary credentials only)",
+          "cost_sensor_enabled": "Enable Amazon Bedrock month-to-date cost sensor"
         },
         "description": "Change the region or credentials. If the region changes, the next step lists model and inference-profile metadata for the new region; otherwise each agent keeps its model.",
         "data_description": {
-          "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones."
+          "aws_session_token": "Leave empty for long-lived IAM user keys. Temporary credentials expire, and Home Assistant will then ask for new ones.",
+          "cost_sensor_enabled": "Queries AWS Cost Explorer every 12 hours for actual account-wide Amazon Bedrock UnblendedCost across all regions. Requires ce:GetCostAndUsage. Billing data is delayed and may be revised."
         }
       },
       "reconfigure_model": {
@@ -151,6 +153,33 @@
       "abort": {
         "entry_not_loaded": "The integration is not loaded. Check the credentials first.",
         "reconfigure_successful": "Agent updated."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "month_to_date_account_cost": {
+        "name": "Month-to-date account cost",
+        "state_attributes": {
+          "estimated": {
+            "name": "Estimated by AWS"
+          },
+          "billing_period_start": {
+            "name": "Billing period start"
+          },
+          "billing_period_end_exclusive": {
+            "name": "Billing period end (exclusive)"
+          },
+          "last_updated": {
+            "name": "Last updated"
+          },
+          "metric": {
+            "name": "Cost metric"
+          },
+          "scope": {
+            "name": "Scope"
+          }
+        }
       }
     }
   }

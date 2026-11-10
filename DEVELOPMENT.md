@@ -11,10 +11,12 @@ custom_components/bedrock_conversation/
 ├── config_flow.py    # Setup (region + credentials → model → first agent), reauth, reconfigure,
 │                     # AgentSubentryFlow (add / reconfigure agent)
 ├── confirmation.py   # assess(): which tool calls are sensitive; is_affirmative(); the fixed question
+├── cost.py           # 12-hour Cost Explorer coordinator; billing failures stay sensor-only
 ├── const.py          # Setting keys, defaults, timeouts, service allowlist, AFFIRMATIVE_PHRASES
 ├── conversation.py   # BedrockConversationEntity (one per agent sub-entry): chat log → ConverseStream, tool rounds, held calls
 ├── llm_api.py        # Legacy "AWS Bedrock Services" LLM API: HassCallService and HassGetState
 ├── messages.py       # Pure converters: chat log → Converse messages, HA tools → toolSpec
+├── sensor.py         # Optional entry-level monetary month-to-date Bedrock cost sensor
 ├── utils.py          # closest_color() for the device list (HA's colour table)
 ├── manifest.json     # Metadata, requirements, version (source of truth for releases)
 ├── strings.json      # UI strings (translations/en.json, translations/es.json)
@@ -47,9 +49,10 @@ Errors are mapped in `client.translate_error` and `BedrockConversationEntity._er
 
 ## Config entries
 
-- `data`: `aws_region`, `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`. `options` is empty.
+- `data`: `aws_region`, `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`; optional entry-level `cost_sensor_enabled`. `options` is empty.
 - Sub-entries of type `conversation` (`SUBENTRY_CONVERSATION`), one per agent, created and changed by `AgentSubentryFlow` (`async_get_supported_subentry_types`). Sub-entry `data`: `model`, `prompt`, `llm_hass_api` (list of API IDs), `confirm_sensitive_actions`, `max_tokens`, `temperature`, `max_tool_call_iterations`, `prompt_caching`. Setup creates the first one, titled `DEFAULT_AGENT_NAME` ("AWS Bedrock"). The flow aborts with `entry_not_loaded` unless the entry is loaded. Any sub-entry change reloads the entry (update listener).
 - `conversation.async_setup_entry` adds one `BedrockConversationEntity` per sub-entry; its unique ID is the sub-entry ID. The agent is registered only under its entity ID, not also under the config entry ID (as in Home Assistant's own LLM integrations with sub-entries).
+- `sensor.async_setup_entry` adds one entry-level `BedrockMonthToDateCostSensor` when enabled. Entries with the same access-key ID share a `BedrockCostCoordinator`, so they share 12-hour and manual Cost Explorer refreshes while retaining one sensor entity per entry. Different access-key IDs for the same AWS account cannot be identified without another permission and can expose duplicate account-wide totals. The coordinator queries signed, account-wide Amazon Bedrock `UnblendedCost`; initial and later refresh failures mark only its sensors unavailable.
 - Entry reconfigure keeps every agent's model when the region is unchanged (e.g. rotated keys). After a region change, `async_step_reconfigure_model` sets the chosen model on every agent, because their models may not exist in the new region. A custom title is kept.
 - Version 3.1. `async_migrate_entry` refuses versions newer than 3 and runs the steps in order:
   - 1 → 2.1: the pure, idempotent `migrate_v1_to_v2` removes 1.x placeholders, wraps prompts with template syntax in `{% raw %}`, drops a prompt left empty (HA's default applies) and refreshes only the automatic `AWS Bedrock (<region>)` title. Logs `Migrated <id> to version 2.1`.
@@ -59,7 +62,7 @@ Errors are mapped in `client.translate_error` and `BedrockConversationEntity._er
 
 ## Dependencies
 
-`manifest.json` requires only `boto3>=1.40.0` (colour names come from `homeassistant.util.color`, so `webcolors` is gone). The requirement is a floor, not a pin: Home Assistant's package constraints decide the installed version (boto3 1.42.97 on 2026.11.0), and a pin in the manifest would conflict with them. `requirements-test.txt` pins that same version for tests.
+`manifest.json` requires only `boto3>=1.40.0` (colour names come from `homeassistant.util.color`, so `webcolors` is gone). The requirement is a floor, not a pin: Home Assistant's package constraints decide the installed version (boto3 1.42.97 on 2026.11.0), and a pin in the manifest would conflict with them. `requirements-test.txt` pins that same version for tests. Cost Explorer uses the same boto3 package and credentials; its default-off sensor requires a separate IAM statement allowing `ce:GetCostAndUsage` on `Resource: "*"` because the action exposes account-wide billing data and cannot be restricted to individual resources. It adds no Python dependency.
 
 ## Environment
 
