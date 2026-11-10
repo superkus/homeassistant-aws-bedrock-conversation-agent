@@ -21,6 +21,7 @@ make test                                   # from the repo root: .venv + covera
 | `test_conversation.py` | Answers and memory, request shape, bulk/grouped service calls and state reads, safety limits, spoken errors, reauth, confirmation flow (same device, expiry, duplicates, "all"), other agents refused sensitive services, truncated tool calls, tool calls from other agents |
 | `test_llm_api.py` | `HassCallService` and `HassGetState` single/bulk target validation, atomic exposure checks, and the device list as delimited data |
 | `test_messages.py` | Chat log → Converse messages (foreign tool calls, missing results, conversations starting with the assistant), tool schemas and names, cache points |
+| `test_release.py` | Rejection of untracked release trees, brand PNG hashes, format, and dimensions, and project metadata's reference to the complete `LICENSE` file |
 | `test_utils.py` | `closest_color` |
 
 Coverage is printed in the terminal (`--cov-report=term-missing`).

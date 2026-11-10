@@ -2,13 +2,15 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/v/release/superkus/homeassistant-aws-bedrock-conversation-agent)](https://github.com/superkus/homeassistant-aws-bedrock-conversation-agent/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Code license: MIT](https://img.shields.io/badge/Code%20license-MIT-yellow.svg)](LICENSE)
 
 A Home Assistant custom integration that uses Amazon Bedrock models as a conversation agent, so you can talk to your home and control exposed devices.
 
-Version 2.0.2 requires **Home Assistant 2026.11.0 or later**. It fixes the 2026.11 breakage where 1.x stopped answering (an `AttributeError` on `requires_admin` in its LLM API). Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
+The current version is 2.0.3 and requires **Home Assistant 2026.11.0 or later**. Version 2.0.0 introduced Home Assistant 2026.11 compatibility and fixed the `requires_admin` error that stopped 1.x from answering. Read [Upgrading from 1.x](#upgrading-from-1x) before you update.
 
 This is a fork of [cronus42/homeassistant-aws-bedrock-conversation-agent](https://github.com/cronus42/homeassistant-aws-bedrock-conversation-agent), maintained by [superkus](https://github.com/superkus).
+
+The integration's brand PNGs are derived from the Amazon Bedrock AWS Architecture Icon published and owned by Amazon Web Services (AWS). They are excluded from this project's MIT license. The locally available evidence does not establish permission to redistribute them; review the [asset provenance and rights notice](custom_components/bedrock_conversation/brand/PROVENANCE.md) before reuse. AWS and Amazon Bedrock names and marks are used only for identification; this project claims no ownership, affiliation or endorsement.
 
 ## Features
 
@@ -96,4 +98,4 @@ Next turn: a clear "yes" from the same user and device within 2 minutes runs the
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+The project software is licensed under the [MIT License](LICENSE). The AWS-derived brand PNGs are excluded from that grant; see the [asset provenance and rights notice](custom_components/bedrock_conversation/brand/PROVENANCE.md).

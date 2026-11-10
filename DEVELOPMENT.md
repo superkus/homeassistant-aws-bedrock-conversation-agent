@@ -5,6 +5,7 @@
 ```
 custom_components/bedrock_conversation/
 ├── __init__.py       # Entry setup/unload, registers the "AWS Bedrock Services" API, migrations 1 → 2.1 → 3.1
+├── brand/           # Local HA icon assets and their source/conversion record
 ├── client.py         # BedrockClient: boto3 clients, region list, model listing, ConverseStream,
 │                     # inference profile, temperature and prompt cache fallbacks, error translation
 ├── config_flow.py    # Setup (region + credentials → model → first agent), reauth, reconfigure,

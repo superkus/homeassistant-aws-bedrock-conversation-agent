@@ -19,3 +19,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Third-party asset exception
+
+The MIT License above does not apply to these files:
+
+- custom_components/bedrock_conversation/brand/icon.png
+- custom_components/bedrock_conversation/brand/icon@2x.png
+
+These files are derived from the Amazon Bedrock AWS Architecture Icon published and owned by Amazon Web Services (AWS). AWS retains its rights in the source icon. Their use is subject to the AWS Architecture Icons page, AWS Trademark Guidelines and AWS Site Terms recorded in custom_components/bedrock_conversation/brand/PROVENANCE.md.
+
+AWS and Amazon Bedrock names and marks are used only to identify the source asset and services. This project claims no ownership of those names or marks and no affiliation with or endorsement by AWS.

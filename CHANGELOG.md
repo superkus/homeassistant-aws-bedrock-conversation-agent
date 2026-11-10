@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.3] - 2026-11-10
+
+### Added
+- Local Home Assistant brand icons (`custom_components/bedrock_conversation/brand/icon.png` and `icon@2x.png`) derived from the Amazon Bedrock AWS Architecture Icon published by AWS. Home Assistant 2026.11 can now show the Bedrock icon in Marketplace, integration setup and device pages without a separate brands-repository submission. The [asset provenance and rights notice](custom_components/bedrock_conversation/brand/PROVENANCE.md) records the exact source-package URL and hashes, conversion commands, output checksums, AWS usage references and MIT-license exclusion.
+
 ## [2.0.2] - 2026-11-09
 
 ### Fixed
